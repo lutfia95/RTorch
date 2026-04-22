@@ -1,0 +1,8 @@
+[package]
+name = "pytorch-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pytorch-loader-sys = { path = "../pytorch-loader-sys" }
