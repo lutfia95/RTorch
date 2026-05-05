@@ -118,6 +118,33 @@ impl TensorDataset {
         Ok(Self { raw })
     }
 
+    pub fn len(&self) -> usize {
+        unsafe { sys::ptl_tensor_dataset_len(self.raw) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn class_names(&self) -> Result<Vec<String>, Error> {
+        let count = unsafe { sys::ptl_tensor_dataset_class_count(self.raw) };
+        let mut names = Vec::with_capacity(count);
+
+        for index in 0..count {
+            let ptr = unsafe { sys::ptl_tensor_dataset_class_name(self.raw, index) };
+            if ptr.is_null() {
+                return Err(take_last_error());
+            }
+
+            let name = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned();
+            names.push(name);
+        }
+
+        Ok(names)
+    }
+
     fn raw(&self) -> *mut sys::PtlTensorDataset {
         self.raw
     }
@@ -131,9 +158,32 @@ impl Drop for TensorDataset {
 
 #[derive(Debug)]
 pub struct Batch {
-    pub data: Vec<f32>,
-    pub shape: Vec<usize>,
-    pub labels: Vec<i64>,
+    raw: *mut sys::PtlOwnedBatch,
+    shape: Vec<usize>,
+}
+
+impl Batch {
+    pub fn data(&self) -> &[f32] {
+        let ptr = unsafe { sys::ptl_owned_batch_data(self.raw) };
+        let len = unsafe { sys::ptl_owned_batch_data_len(self.raw) };
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn labels(&self) -> &[i64] {
+        let ptr = unsafe { sys::ptl_owned_batch_labels(self.raw) };
+        let len = unsafe { sys::ptl_owned_batch_labels_len(self.raw) };
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        unsafe { sys::ptl_owned_batch_free(self.raw) }
+    }
 }
 
 pub struct DataLoader<'a> {
@@ -179,28 +229,29 @@ impl<'a> DataLoader<'a> {
     }
 
     pub fn next_batch(&mut self) -> Result<Option<Batch>, Error> {
-        let mut batch = sys::PtlBatchView {
-            data: std::ptr::null(),
-            data_len: 0,
-            shape: std::ptr::null(),
-            shape_len: 0,
-            labels: std::ptr::null(),
-            labels_len: 0,
-        };
+        let mut batch = std::ptr::null_mut();
 
         let status = unsafe { sys::ptl_data_loader_next(self.raw, &mut batch) };
         match status {
             sys::PTL_STATUS_OK => {
-                let data = unsafe { std::slice::from_raw_parts(batch.data, batch.data_len) }.to_vec();
-                let raw_shape = unsafe { std::slice::from_raw_parts(batch.shape, batch.shape_len) };
+                let raw_shape = unsafe {
+                    std::slice::from_raw_parts(
+                        sys::ptl_owned_batch_shape(batch),
+                        sys::ptl_owned_batch_shape_len(batch),
+                    )
+                };
                 let mut shape = Vec::with_capacity(raw_shape.len());
                 for value in raw_shape {
-                    shape.push((*value).try_into().map_err(|_| Error::ShapeOverflow)?);
+                    let converted = match (*value).try_into() {
+                        Ok(converted) => converted,
+                        Err(_) => {
+                            unsafe { sys::ptl_owned_batch_free(batch) };
+                            return Err(Error::ShapeOverflow);
+                        }
+                    };
+                    shape.push(converted);
                 }
-                let labels =
-                    unsafe { std::slice::from_raw_parts(batch.labels, batch.labels_len) }.to_vec();
-                unsafe { sys::ptl_batch_view_free(&mut batch) };
-                Ok(Some(Batch { data, shape, labels }))
+                Ok(Some(Batch { raw: batch, shape }))
             }
             sys::PTL_STATUS_END => Ok(None),
             _ => Err(take_last_error()),

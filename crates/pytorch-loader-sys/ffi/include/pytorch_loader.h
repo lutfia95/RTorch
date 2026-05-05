@@ -17,15 +17,7 @@ enum {
 typedef struct PtlTransformPipeline PtlTransformPipeline;
 typedef struct PtlTensorDataset PtlTensorDataset;
 typedef struct PtlDataLoader PtlDataLoader;
-
-typedef struct PtlBatchView {
-  const float* data;
-  size_t data_len;
-  const int64_t* shape;
-  size_t shape_len;
-  const int64_t* labels;
-  size_t labels_len;
-} PtlBatchView;
+typedef struct PtlOwnedBatch PtlOwnedBatch;
 
 const char* ptl_last_error_message(void);
 void ptl_last_error_free(char* message);
@@ -44,6 +36,9 @@ void ptl_transform_pipeline_free(PtlTransformPipeline* pipeline);
 
 PtlTensorDataset* ptl_tensor_dataset_new(const char* root);
 void ptl_tensor_dataset_free(PtlTensorDataset* dataset);
+size_t ptl_tensor_dataset_len(const PtlTensorDataset* dataset);
+size_t ptl_tensor_dataset_class_count(const PtlTensorDataset* dataset);
+const char* ptl_tensor_dataset_class_name(const PtlTensorDataset* dataset, size_t class_index);
 
 PtlDataLoader* ptl_data_loader_new(
     PtlTensorDataset* dataset,
@@ -52,9 +47,15 @@ PtlDataLoader* ptl_data_loader_new(
     bool shuffle);
 void ptl_data_loader_free(PtlDataLoader* loader);
 bool ptl_data_loader_reset(PtlDataLoader* loader);
-int ptl_data_loader_next(PtlDataLoader* loader, PtlBatchView* out);
+int ptl_data_loader_next(PtlDataLoader* loader, PtlOwnedBatch** out);
 
-void ptl_batch_view_free(PtlBatchView* batch);
+const float* ptl_owned_batch_data(const PtlOwnedBatch* batch);
+size_t ptl_owned_batch_data_len(const PtlOwnedBatch* batch);
+const int64_t* ptl_owned_batch_shape(const PtlOwnedBatch* batch);
+size_t ptl_owned_batch_shape_len(const PtlOwnedBatch* batch);
+const int64_t* ptl_owned_batch_labels(const PtlOwnedBatch* batch);
+size_t ptl_owned_batch_labels_len(const PtlOwnedBatch* batch);
+void ptl_owned_batch_free(PtlOwnedBatch* batch);
 
 #ifdef __cplusplus
 }

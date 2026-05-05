@@ -20,13 +20,8 @@ pub struct PtlDataLoader {
 }
 
 #[repr(C)]
-pub struct PtlBatchView {
-    pub data: *const f32,
-    pub data_len: usize,
-    pub shape: *const i64,
-    pub shape_len: usize,
-    pub labels: *const i64,
-    pub labels_len: usize,
+pub struct PtlOwnedBatch {
+    _private: [u8; 0],
 }
 
 unsafe extern "C" {
@@ -48,6 +43,12 @@ unsafe extern "C" {
 
     pub fn ptl_tensor_dataset_new(root: *const c_char) -> *mut PtlTensorDataset;
     pub fn ptl_tensor_dataset_free(dataset: *mut PtlTensorDataset);
+    pub fn ptl_tensor_dataset_len(dataset: *const PtlTensorDataset) -> usize;
+    pub fn ptl_tensor_dataset_class_count(dataset: *const PtlTensorDataset) -> usize;
+    pub fn ptl_tensor_dataset_class_name(
+        dataset: *const PtlTensorDataset,
+        class_index: usize,
+    ) -> *const c_char;
 
     pub fn ptl_data_loader_new(
         dataset: *mut PtlTensorDataset,
@@ -57,7 +58,13 @@ unsafe extern "C" {
     ) -> *mut PtlDataLoader;
     pub fn ptl_data_loader_free(loader: *mut PtlDataLoader);
     pub fn ptl_data_loader_reset(loader: *mut PtlDataLoader) -> bool;
-    pub fn ptl_data_loader_next(loader: *mut PtlDataLoader, out: *mut PtlBatchView) -> c_int;
+    pub fn ptl_data_loader_next(loader: *mut PtlDataLoader, out: *mut *mut PtlOwnedBatch) -> c_int;
 
-    pub fn ptl_batch_view_free(batch: *mut PtlBatchView);
+    pub fn ptl_owned_batch_data(batch: *const PtlOwnedBatch) -> *const f32;
+    pub fn ptl_owned_batch_data_len(batch: *const PtlOwnedBatch) -> usize;
+    pub fn ptl_owned_batch_shape(batch: *const PtlOwnedBatch) -> *const i64;
+    pub fn ptl_owned_batch_shape_len(batch: *const PtlOwnedBatch) -> usize;
+    pub fn ptl_owned_batch_labels(batch: *const PtlOwnedBatch) -> *const i64;
+    pub fn ptl_owned_batch_labels_len(batch: *const PtlOwnedBatch) -> usize;
+    pub fn ptl_owned_batch_free(batch: *mut PtlOwnedBatch);
 }

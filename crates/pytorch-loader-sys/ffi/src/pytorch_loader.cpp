@@ -110,7 +110,6 @@ struct DataLoaderImpl {
   size_t cursor = 0;
   bool shuffle = false;
   std::mt19937 rng{std::random_device{}()};
-  std::unique_ptr<BatchStorage> current_batch;
 
   void reset() {
     indices.resize(dataset->samples.size());
@@ -121,7 +120,6 @@ struct DataLoaderImpl {
       std::shuffle(indices.begin(), indices.end(), rng);
     }
     cursor = 0;
-    current_batch.reset();
   }
 };
 
@@ -203,6 +201,10 @@ struct PtlDataLoader {
   DataLoaderImpl inner;
 };
 
+struct PtlOwnedBatch {
+  BatchStorage inner;
+};
+
 extern "C" const char* ptl_last_error_message(void) {
   return protect<const char*>([]() {
     char* message = static_cast<char*>(std::malloc(g_last_error.size() + 1));
@@ -262,6 +264,38 @@ extern "C" void ptl_tensor_dataset_free(PtlTensorDataset* dataset) {
   delete dataset;
 }
 
+extern "C" size_t ptl_tensor_dataset_len(const PtlTensorDataset* dataset) {
+  return protect<size_t>([&]() {
+    if (dataset == nullptr) {
+      throw std::runtime_error("dataset pointer was null");
+    }
+    return dataset->inner.samples.size();
+  }, 0);
+}
+
+extern "C" size_t ptl_tensor_dataset_class_count(const PtlTensorDataset* dataset) {
+  return protect<size_t>([&]() {
+    if (dataset == nullptr) {
+      throw std::runtime_error("dataset pointer was null");
+    }
+    return dataset->inner.class_names.size();
+  }, 0);
+}
+
+extern "C" const char* ptl_tensor_dataset_class_name(
+    const PtlTensorDataset* dataset,
+    size_t class_index) {
+  return protect<const char*>([&]() {
+    if (dataset == nullptr) {
+      throw std::runtime_error("dataset pointer was null");
+    }
+    if (class_index >= dataset->inner.class_names.size()) {
+      throw std::runtime_error("class index out of range");
+    }
+    return dataset->inner.class_names[class_index].c_str();
+  }, nullptr);
+}
+
 extern "C" PtlDataLoader* ptl_data_loader_new(
     PtlTensorDataset* dataset,
     PtlTransformPipeline* pipeline,
@@ -299,12 +333,13 @@ extern "C" bool ptl_data_loader_reset(PtlDataLoader* loader) {
   }, false);
 }
 
-extern "C" int ptl_data_loader_next(PtlDataLoader* loader, PtlBatchView* out) {
+extern "C" int ptl_data_loader_next(PtlDataLoader* loader, PtlOwnedBatch** out) {
   return protect<int>([&]() {
     if (loader == nullptr || out == nullptr) {
       throw std::runtime_error("loader or batch output pointer was null");
     }
     if (loader->inner.cursor >= loader->inner.indices.size()) {
+      *out = nullptr;
       return PTL_STATUS_END;
     }
 
@@ -328,34 +363,46 @@ extern "C" int ptl_data_loader_next(PtlDataLoader* loader, PtlBatchView* out) {
     }
 
     auto stacked = torch::stack(batch_tensors).contiguous().to(torch::kFloat32);
-    auto storage = std::make_unique<BatchStorage>();
-    storage->shape.assign(stacked.sizes().begin(), stacked.sizes().end());
-    storage->labels = std::move(labels);
+    auto batch = std::make_unique<PtlOwnedBatch>();
+    batch->inner.shape.assign(stacked.sizes().begin(), stacked.sizes().end());
+    batch->inner.labels = std::move(labels);
 
     const auto count = static_cast<size_t>(stacked.numel());
-    storage->data.resize(count);
-    std::memcpy(storage->data.data(), stacked.data_ptr<float>(), count * sizeof(float));
+    batch->inner.data.resize(count);
+    std::memcpy(batch->inner.data.data(), stacked.data_ptr<float>(), count * sizeof(float));
 
-    out->data = storage->data.data();
-    out->data_len = storage->data.size();
-    out->shape = storage->shape.data();
-    out->shape_len = storage->shape.size();
-    out->labels = storage->labels.data();
-    out->labels_len = storage->labels.size();
-
-    loader->inner.current_batch = std::move(storage);
+    *out = batch.release();
     return PTL_STATUS_OK;
   }, PTL_STATUS_ERR);
 }
 
-extern "C" void ptl_batch_view_free(PtlBatchView* batch) {
+extern "C" const float* ptl_owned_batch_data(const PtlOwnedBatch* batch) {
+  return batch == nullptr ? nullptr : batch->inner.data.data();
+}
+
+extern "C" size_t ptl_owned_batch_data_len(const PtlOwnedBatch* batch) {
+  return batch == nullptr ? 0 : batch->inner.data.size();
+}
+
+extern "C" const int64_t* ptl_owned_batch_shape(const PtlOwnedBatch* batch) {
+  return batch == nullptr ? nullptr : batch->inner.shape.data();
+}
+
+extern "C" size_t ptl_owned_batch_shape_len(const PtlOwnedBatch* batch) {
+  return batch == nullptr ? 0 : batch->inner.shape.size();
+}
+
+extern "C" const int64_t* ptl_owned_batch_labels(const PtlOwnedBatch* batch) {
+  return batch == nullptr ? nullptr : batch->inner.labels.data();
+}
+
+extern "C" size_t ptl_owned_batch_labels_len(const PtlOwnedBatch* batch) {
+  return batch == nullptr ? 0 : batch->inner.labels.size();
+}
+
+extern "C" void ptl_owned_batch_free(PtlOwnedBatch* batch) {
   if (batch == nullptr) {
     return;
   }
-  batch->data = nullptr;
-  batch->data_len = 0;
-  batch->shape = nullptr;
-  batch->shape_len = 0;
-  batch->labels = nullptr;
-  batch->labels_len = 0;
+  delete batch;
 }
