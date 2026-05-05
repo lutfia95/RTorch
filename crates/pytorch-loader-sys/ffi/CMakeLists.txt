@@ -18,3 +18,9 @@ target_include_directories(pytorch_loader_ffi PUBLIC
 target_link_libraries(pytorch_loader_ffi PUBLIC
   ${TORCH_LIBRARIES}
 )
+
+install(TARGETS pytorch_loader_ffi
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)

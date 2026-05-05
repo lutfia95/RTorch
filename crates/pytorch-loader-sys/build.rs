@@ -10,7 +10,6 @@ fn main() {
 
     let dst = cmake::Config::new("ffi")
         .define("CMAKE_PREFIX_PATH", &libtorch_path)
-        .define("LIBTORCH_ROOT", &libtorch_path)
         .define("CMAKE_CXX_STANDARD", "17")
         .build();
 
