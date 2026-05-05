@@ -11,11 +11,16 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install LibTorch
+      run: |
+        curl -L https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-latest%2Bcpu.zip -o /tmp/libtorch.zip
+        unzip -q /tmp/libtorch.zip -d "${RUNNER_TEMP}"
+        echo "LIBTORCH=${RUNNER_TEMP}/libtorch" >> "${GITHUB_ENV}"
+        echo "LD_LIBRARY_PATH=${RUNNER_TEMP}/libtorch/lib:${LD_LIBRARY_PATH}" >> "${GITHUB_ENV}"
     - name: Build
       run: cargo build --verbose
     - name: Run tests
