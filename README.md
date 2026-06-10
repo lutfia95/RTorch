@@ -138,6 +138,179 @@ cargo build
 
 `LIBTORCH` must point to the LibTorch root directory containing `include/` and `lib/`.
 
+## Add RTorch To A Rust Project
+
+Until RTorch is published on crates.io, add it as a path dependency:
+
+```toml
+[dependencies]
+rtorch = { path = "/path/to/RTorch/crates/rtorch" }
+```
+
+Then build or run with LibTorch available:
+
+```bash
+export LIBTORCH=/path/to/libtorch
+cargo run
+```
+
+On Linux, the LibTorch shared-library directory may also need to be added to
+`LD_LIBRARY_PATH`:
+
+```bash
+export LD_LIBRARY_PATH="$LIBTORCH/lib:$LD_LIBRARY_PATH"
+```
+
+## Usage Examples
+
+### Compute Statistics From Rust Values
+
+This calls LibTorch reductions without creating a dataset:
+
+```rust
+use rtorch::statistics;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let values = [1.0_f32, 2.0, 3.0, 4.0];
+    let stats = statistics(&values)?;
+
+    println!("count: {}", stats.count);
+    println!("sum: {}", stats.sum);
+    println!("mean: {}", stats.mean);
+    println!("population std: {}", stats.population_std);
+    println!("sample std: {}", stats.sample_std);
+    println!("min: {}", stats.min);
+    println!("max: {}", stats.max);
+
+    Ok(())
+}
+```
+
+### Inspect A Dataset
+
+The dataset root must contain one directory per class:
+
+```rust
+use rtorch::TensorDataset;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dataset = TensorDataset::from_class_folders("dataset")?;
+
+    println!("samples: {}", dataset.len());
+    println!("classes: {:?}", dataset.class_names()?);
+
+    Ok(())
+}
+```
+
+For this directory:
+
+```text
+dataset/
+  cats/
+    cat_001.pt
+  dogs/
+    dog_001.pt
+```
+
+`class_names()` returns `["cats", "dogs"]`, and their labels are `0` and `1`.
+
+### Load Batches Without Transforms
+
+```rust
+use rtorch::{DataLoader, TensorDataset};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dataset = TensorDataset::from_class_folders("dataset")?;
+    let mut loader = DataLoader::new(&dataset, None, 16, false)?;
+
+    while let Some(batch) = loader.next_batch()? {
+        println!("shape: {:?}", batch.shape());
+        println!("labels: {:?}", batch.labels());
+        println!("elements: {}", batch.data().len());
+    }
+
+    Ok(())
+}
+```
+
+All tensors in a batch must have compatible shapes because LibTorch stacks them
+into one batch tensor.
+
+### Load, Transform, And Analyze Batches
+
+```rust
+use rtorch::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dataset = TensorDataset::from_class_folders("dataset")?;
+
+    let transforms = TransformPipeline::new(&TransformConfig {
+        to_float: true,
+        resize: Some((256, 256)),
+        center_crop: Some((224, 224)),
+        normalize_mean: Some(vec![0.485, 0.456, 0.406]),
+        normalize_std: Some(vec![0.229, 0.224, 0.225]),
+    })?;
+
+    let mut loader = DataLoader::new(&dataset, Some(&transforms), 8, true)?;
+
+    while let Some(batch) = loader.next_batch()? {
+        let stats = batch.statistics()?;
+
+        println!("shape: {:?}", batch.shape());
+        println!("labels: {:?}", batch.labels());
+        println!("mean: {:.6}", stats.mean);
+        println!("population std: {:.6}", stats.population_std);
+        println!("range: [{:.6}, {:.6}]", stats.min, stats.max);
+    }
+
+    Ok(())
+}
+```
+
+Batch statistics cover every tensor element in the batch, not the labels.
+
+### Iterate For Multiple Epochs
+
+```rust
+use rtorch::{DataLoader, TensorDataset};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dataset = TensorDataset::from_class_folders("dataset")?;
+    let mut loader = DataLoader::new(&dataset, None, 32, true)?;
+
+    for epoch in 0..3 {
+        loader.reset()?;
+
+        while let Some(batch) = loader.next_batch()? {
+            println!("epoch={epoch} shape={:?}", batch.shape());
+        }
+    }
+
+    Ok(())
+}
+```
+
+When shuffling is enabled, `reset()` creates a new shuffled sample order.
+
+### Read Values From A Batch
+
+`Batch::data()` is a flat `f32` slice in row-major tensor order:
+
+```rust
+while let Some(batch) = loader.next_batch()? {
+    let shape = batch.shape();
+    let values = batch.data();
+
+    println!("shape: {shape:?}");
+    println!("first value: {:?}", values.first());
+}
+```
+
+For shape `[8, 3, 224, 224]`, the flat slice contains
+`8 * 3 * 224 * 224` values.
+
 ## API Overview
 
 The main Rust types are:
