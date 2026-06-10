@@ -220,6 +220,39 @@ RtStatistics calculate_statistics(const torch::Tensor& input) {
   return statistics;
 }
 
+c10::ScalarType scalar_type_from_ffi(int scalar_type) {
+  switch (scalar_type) {
+    case RT_SCALAR_BOOL:
+      return c10::kBool;
+    case RT_SCALAR_U8:
+      return c10::kByte;
+    case RT_SCALAR_I8:
+      return c10::kChar;
+    case RT_SCALAR_I16:
+      return c10::kShort;
+    case RT_SCALAR_I32:
+      return c10::kInt;
+    case RT_SCALAR_I64:
+      return c10::kLong;
+    case RT_SCALAR_U16:
+      return c10::kUInt16;
+    case RT_SCALAR_U32:
+      return c10::kUInt32;
+    case RT_SCALAR_U64:
+      return c10::kUInt64;
+    case RT_SCALAR_F16:
+      return c10::kHalf;
+    case RT_SCALAR_BF16:
+      return c10::kBFloat16;
+    case RT_SCALAR_F32:
+      return c10::kFloat;
+    case RT_SCALAR_F64:
+      return c10::kDouble;
+    default:
+      throw std::runtime_error("unsupported statistics scalar type");
+  }
+}
+
 }  // namespace
 
 struct RtTransformPipeline {
@@ -251,9 +284,10 @@ extern "C" void rt_last_error_free(char* message) {
   std::free(message);
 }
 
-extern "C" bool rt_statistics_f32(
-    const float* data,
+extern "C" bool rt_statistics(
+    const void* data,
     size_t len,
+    int scalar_type,
     RtStatistics* out) {
   return protect<bool>([&]() {
     if (len == 0) {
@@ -267,9 +301,9 @@ extern "C" bool rt_statistics_f32(
     }
 
     auto values = torch::from_blob(
-        const_cast<float*>(data),
+        const_cast<void*>(data),
         {static_cast<int64_t>(len)},
-        torch::TensorOptions().dtype(torch::kFloat32));
+        torch::TensorOptions().dtype(scalar_type_from_ffi(scalar_type)));
     *out = calculate_statistics(values);
     return true;
   }, false);

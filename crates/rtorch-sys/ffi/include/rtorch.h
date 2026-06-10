@@ -14,6 +14,22 @@ enum {
   RT_STATUS_ERR = 2,
 };
 
+enum {
+  RT_SCALAR_BOOL = 0,
+  RT_SCALAR_U8 = 1,
+  RT_SCALAR_I8 = 2,
+  RT_SCALAR_I16 = 3,
+  RT_SCALAR_I32 = 4,
+  RT_SCALAR_I64 = 5,
+  RT_SCALAR_U16 = 6,
+  RT_SCALAR_U32 = 7,
+  RT_SCALAR_U64 = 8,
+  RT_SCALAR_F16 = 9,
+  RT_SCALAR_BF16 = 10,
+  RT_SCALAR_F32 = 11,
+  RT_SCALAR_F64 = 12,
+};
+
 typedef struct RtTransformPipeline RtTransformPipeline;
 typedef struct RtTensorDataset RtTensorDataset;
 typedef struct RtDataLoader RtDataLoader;
@@ -31,7 +47,11 @@ typedef struct RtStatistics {
 
 char* rt_last_error_message(void);
 void rt_last_error_free(char* message);
-bool rt_statistics_f32(const float* data, size_t len, RtStatistics* out);
+bool rt_statistics(
+    const void* data,
+    size_t len,
+    int scalar_type,
+    RtStatistics* out);
 
 RtTransformPipeline* rt_transform_pipeline_new(
     bool to_float,

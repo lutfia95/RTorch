@@ -4,6 +4,20 @@ pub const RT_STATUS_OK: c_int = 0;
 pub const RT_STATUS_END: c_int = 1;
 pub const RT_STATUS_ERR: c_int = 2;
 
+pub const RT_SCALAR_BOOL: c_int = 0;
+pub const RT_SCALAR_U8: c_int = 1;
+pub const RT_SCALAR_I8: c_int = 2;
+pub const RT_SCALAR_I16: c_int = 3;
+pub const RT_SCALAR_I32: c_int = 4;
+pub const RT_SCALAR_I64: c_int = 5;
+pub const RT_SCALAR_U16: c_int = 6;
+pub const RT_SCALAR_U32: c_int = 7;
+pub const RT_SCALAR_U64: c_int = 8;
+pub const RT_SCALAR_F16: c_int = 9;
+pub const RT_SCALAR_BF16: c_int = 10;
+pub const RT_SCALAR_F32: c_int = 11;
+pub const RT_SCALAR_F64: c_int = 12;
+
 #[repr(C)]
 pub struct RtTransformPipeline {
     _private: [u8; 0],
@@ -39,9 +53,10 @@ pub struct RtStatistics {
 unsafe extern "C" {
     pub fn rt_last_error_message() -> *mut c_char;
     pub fn rt_last_error_free(message: *mut c_char);
-    pub fn rt_statistics_f32(
-        data: *const f32,
+    pub fn rt_statistics(
+        data: *const std::ffi::c_void,
         len: usize,
+        scalar_type: c_int,
         out: *mut RtStatistics,
     ) -> bool;
 

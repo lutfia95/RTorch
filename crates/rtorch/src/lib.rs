@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use std::path::Path;
 
+pub use half::{bf16, f16};
 use rtorch_sys as sys;
 
 #[derive(Debug)]
@@ -84,15 +85,58 @@ fn statistics_from_raw(raw: sys::RtStatistics) -> Statistics {
     }
 }
 
-/// Computes aggregate statistics with LibTorch over a Rust `f32` slice.
-pub fn statistics(values: &[f32]) -> Result<Statistics, Error> {
+mod private {
+    pub trait Sealed {}
+}
+
+/// A Rust scalar type that RTorch can pass to LibTorch for statistics.
+pub trait StatisticsElement: private::Sealed {
+    #[doc(hidden)]
+    const SCALAR_TYPE: i32;
+}
+
+macro_rules! impl_statistics_element {
+    ($type:ty, $scalar_type:expr) => {
+        impl private::Sealed for $type {}
+
+        impl StatisticsElement for $type {
+            const SCALAR_TYPE: i32 = $scalar_type;
+        }
+    };
+}
+
+impl_statistics_element!(bool, sys::RT_SCALAR_BOOL);
+impl_statistics_element!(u8, sys::RT_SCALAR_U8);
+impl_statistics_element!(i8, sys::RT_SCALAR_I8);
+impl_statistics_element!(i16, sys::RT_SCALAR_I16);
+impl_statistics_element!(i32, sys::RT_SCALAR_I32);
+impl_statistics_element!(i64, sys::RT_SCALAR_I64);
+impl_statistics_element!(u16, sys::RT_SCALAR_U16);
+impl_statistics_element!(u32, sys::RT_SCALAR_U32);
+impl_statistics_element!(u64, sys::RT_SCALAR_U64);
+impl_statistics_element!(f16, sys::RT_SCALAR_F16);
+impl_statistics_element!(bf16, sys::RT_SCALAR_BF16);
+impl_statistics_element!(f32, sys::RT_SCALAR_F32);
+impl_statistics_element!(f64, sys::RT_SCALAR_F64);
+
+#[cfg(target_pointer_width = "32")]
+impl_statistics_element!(usize, sys::RT_SCALAR_U32);
+#[cfg(target_pointer_width = "64")]
+impl_statistics_element!(usize, sys::RT_SCALAR_U64);
+#[cfg(target_pointer_width = "32")]
+impl_statistics_element!(isize, sys::RT_SCALAR_I32);
+#[cfg(target_pointer_width = "64")]
+impl_statistics_element!(isize, sys::RT_SCALAR_I64);
+
+/// Computes aggregate statistics with LibTorch over a supported Rust slice.
+pub fn statistics<T: StatisticsElement>(values: &[T]) -> Result<Statistics, Error> {
     let mut raw = sys::RtStatistics::default();
     let data = if values.is_empty() {
         std::ptr::null()
     } else {
-        values.as_ptr()
+        values.as_ptr().cast()
     };
-    let ok = unsafe { sys::rt_statistics_f32(data, values.len(), &mut raw) };
+    let ok = unsafe { sys::rt_statistics(data, values.len(), T::SCALAR_TYPE, &mut raw) };
     if !ok {
         return Err(take_last_error());
     }
@@ -328,14 +372,14 @@ impl Drop for DataLoader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::statistics;
+    use super::{bf16, f16, statistics};
 
     fn assert_close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1.0e-12);
     }
 
     #[test]
-    fn computes_statistics_with_libtorch() {
+    fn computes_f32_statistics_with_libtorch() {
         let result = statistics(&[1.0, 2.0, 3.0, 4.0]).unwrap();
 
         assert_eq!(result.count, 4);
@@ -348,7 +392,56 @@ mod tests {
     }
 
     #[test]
+    fn computes_f64_statistics_with_libtorch() {
+        let result = statistics(&[1.5_f64, 2.5, 3.5]).unwrap();
+
+        assert_eq!(result.count, 3);
+        assert_close(result.mean, 2.5);
+        assert_close(result.min, 1.5);
+        assert_close(result.max, 3.5);
+    }
+
+    #[test]
+    fn computes_integer_statistics_with_libtorch() {
+        let signed = statistics(&[-4_i64, 0, 8]).unwrap();
+        let unsigned = statistics(&[2_u16, 4, 6]).unwrap();
+
+        assert_close(signed.mean, 4.0 / 3.0);
+        assert_close(signed.min, -4.0);
+        assert_close(unsigned.mean, 4.0);
+        assert_close(unsigned.max, 6.0);
+    }
+
+    #[test]
+    fn computes_reduced_float_statistics_with_libtorch() {
+        let float16 = statistics(&[
+            f16::from_f32(1.0),
+            f16::from_f32(2.0),
+            f16::from_f32(3.0),
+        ])
+        .unwrap();
+        let bfloat16 = statistics(&[
+            bf16::from_f32(2.0),
+            bf16::from_f32(4.0),
+            bf16::from_f32(6.0),
+        ])
+        .unwrap();
+
+        assert_close(float16.mean, 2.0);
+        assert_close(bfloat16.mean, 4.0);
+    }
+
+    #[test]
+    fn computes_boolean_statistics_with_libtorch() {
+        let result = statistics(&[true, false, true, true]).unwrap();
+
+        assert_close(result.mean, 0.75);
+        assert_close(result.min, 0.0);
+        assert_close(result.max, 1.0);
+    }
+
+    #[test]
     fn rejects_empty_statistics_input() {
-        assert!(statistics(&[]).is_err());
+        assert!(statistics::<f32>(&[]).is_err());
     }
 }

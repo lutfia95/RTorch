@@ -39,7 +39,7 @@ The repository currently includes:
   - mean
   - population and sample standard deviation
   - minimum and maximum
-- standalone Torch-backed statistics over Rust `f32` slices
+- standalone Torch-backed statistics over common Rust numeric slices
 
 ## What Is Not Included Yet
 
@@ -186,6 +186,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+The same function accepts different scalar types:
+
+```rust
+use rtorch::statistics;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let float32 = statistics(&[1.0_f32, 2.0, 3.0])?;
+    let float64 = statistics(&[1.0_f64, 2.0, 3.0])?;
+    let signed = statistics(&[-10_i64, 0, 10])?;
+    let unsigned = statistics(&[10_u16, 20, 30])?;
+    let booleans = statistics(&[true, false, true])?;
+
+    println!("f32 mean: {}", float32.mean);
+    println!("f64 mean: {}", float64.mean);
+    println!("i64 range: {}..={}", signed.min, signed.max);
+    println!("u16 sum: {}", unsigned.sum);
+    println!("true fraction: {}", booleans.mean);
+
+    Ok(())
+}
+```
+
+### Use `f16` And `bf16`
+
+Rust does not provide built-in `f16` or `bf16` primitive types. RTorch re-exports
+both types from the `half` crate:
+
+```rust
+use rtorch::{bf16, f16, statistics};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let float16_values = [
+        f16::from_f32(1.0),
+        f16::from_f32(2.0),
+        f16::from_f32(3.0),
+    ];
+    let bfloat16_values = [
+        bf16::from_f32(2.0),
+        bf16::from_f32(4.0),
+        bf16::from_f32(6.0),
+    ];
+
+    println!("f16: {:?}", statistics(&float16_values)?);
+    println!("bf16: {:?}", statistics(&bfloat16_values)?);
+
+    Ok(())
+}
+```
+
+### Supported Statistics Types
+
+| Rust type | LibTorch dtype |
+| --- | --- |
+| `f16` | `torch.float16` |
+| `bf16` | `torch.bfloat16` |
+| `f32` | `torch.float32` |
+| `f64` | `torch.float64` |
+| `i8`, `i16`, `i32`, `i64` | Matching signed integer dtype |
+| `u8`, `u16`, `u32`, `u64` | Matching unsigned integer dtype |
+| `isize`, `usize` | Matching 32-bit or 64-bit integer dtype |
+| `bool` | `torch.bool` |
+
+All fields in the returned `Statistics` value are `f64`, regardless of input
+type. Integer values larger than the exact range of `f64` may therefore lose
+precision in `sum`, `mean`, `min`, or `max`.
+
+Run the repository's multi-type example with:
+
+```bash
+cargo run -p rtorch --example statistics
+```
+
+These types currently apply to the standalone `statistics(&[T])` API. The
+dataset loader converts returned batch storage to `f32`, so `Batch::data()`
+remains `&[f32]` and `Batch::statistics()` describes those returned `f32`
+values.
+
 ### Inspect A Dataset
 
 The dataset root must contain one directory per class:
@@ -321,7 +398,8 @@ The main Rust types are:
 - `DataLoader`
 - `Batch`
 - `Statistics`
-- `statistics(&[f32])`
+- `StatisticsElement`
+- `statistics(&[T])`
 
 Typical flow:
 
@@ -615,6 +693,7 @@ README.md
 crates/
   rtorch/
     src/lib.rs
+    examples/statistics.rs
     examples/tensor_folder.rs
   rtorch-sys/
     src/lib.rs
