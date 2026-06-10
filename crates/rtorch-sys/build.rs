@@ -14,7 +14,7 @@ fn main() {
         .build();
 
     println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
-    println!("cargo:rustc-link-lib=static=pytorch_loader_ffi");
+    println!("cargo:rustc-link-lib=static=rtorch_ffi");
     println!("cargo:rustc-link-search=native={}", libtorch_path.join("lib").display());
     println!("cargo:rustc-link-lib=dylib=torch");
     println!("cargo:rustc-link-lib=dylib=torch_cpu");

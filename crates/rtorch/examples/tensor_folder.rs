@@ -1,4 +1,4 @@
-use pytorch_loader::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
+use rtorch::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dataset = TensorDataset::from_class_folders("dataset")?;
@@ -13,7 +13,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut loader = DataLoader::new(&dataset, Some(&transforms), 4, true)?;
 
     while let Some(batch) = loader.next_batch()? {
-        println!("shape={:?} labels={:?}", batch.shape, batch.labels);
+        println!(
+            "shape={:?} labels={:?} statistics={:?}",
+            batch.shape(),
+            batch.labels(),
+            batch.statistics()?
+        );
     }
 
     Ok(())

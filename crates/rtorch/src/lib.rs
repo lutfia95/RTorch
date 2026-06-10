@@ -1,10 +1,9 @@
 use std::ffi::{CString, NulError};
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
-use std::os::raw::c_char;
 use std::path::Path;
 
-use pytorch_loader_sys as sys;
+use rtorch_sys as sys;
 
 #[derive(Debug)]
 pub enum Error {
@@ -40,7 +39,7 @@ fn path_to_cstring(path: &Path) -> Result<CString, Error> {
 
 fn take_last_error() -> Error {
     unsafe {
-        let ptr = sys::ptl_last_error_message();
+        let ptr = sys::rt_last_error_message();
         if ptr.is_null() {
             return Error::Backend("unknown backend error".to_string());
         }
@@ -48,7 +47,7 @@ fn take_last_error() -> Error {
         let message = std::ffi::CStr::from_ptr(ptr)
             .to_string_lossy()
             .into_owned();
-        sys::ptl_last_error_free(ptr as *mut c_char);
+        sys::rt_last_error_free(ptr);
         Error::Backend(message)
     }
 }
@@ -62,8 +61,46 @@ pub struct TransformConfig {
     pub normalize_std: Option<Vec<f32>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Statistics {
+    pub count: usize,
+    pub sum: f64,
+    pub mean: f64,
+    pub population_std: f64,
+    pub sample_std: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+fn statistics_from_raw(raw: sys::RtStatistics) -> Statistics {
+    Statistics {
+        count: raw.count,
+        sum: raw.sum,
+        mean: raw.mean,
+        population_std: raw.population_std,
+        sample_std: raw.sample_std,
+        min: raw.min,
+        max: raw.max,
+    }
+}
+
+/// Computes aggregate statistics with LibTorch over a Rust `f32` slice.
+pub fn statistics(values: &[f32]) -> Result<Statistics, Error> {
+    let mut raw = sys::RtStatistics::default();
+    let data = if values.is_empty() {
+        std::ptr::null()
+    } else {
+        values.as_ptr()
+    };
+    let ok = unsafe { sys::rt_statistics_f32(data, values.len(), &mut raw) };
+    if !ok {
+        return Err(take_last_error());
+    }
+    Ok(statistics_from_raw(raw))
+}
+
 pub struct TransformPipeline {
-    raw: *mut sys::PtlTransformPipeline,
+    raw: *mut sys::RtTransformPipeline,
 }
 
 impl TransformPipeline {
@@ -72,15 +109,23 @@ impl TransformPipeline {
         let std = config.normalize_std.as_deref().unwrap_or(&[]);
 
         let raw = unsafe {
-            sys::ptl_transform_pipeline_new(
+            sys::rt_transform_pipeline_new(
                 config.to_float,
                 config.resize.map(|v| v.0).unwrap_or(-1),
                 config.resize.map(|v| v.1).unwrap_or(-1),
                 config.center_crop.map(|v| v.0).unwrap_or(-1),
                 config.center_crop.map(|v| v.1).unwrap_or(-1),
-                mean.as_ptr(),
+                if mean.is_empty() {
+                    std::ptr::null()
+                } else {
+                    mean.as_ptr()
+                },
                 mean.len(),
-                std.as_ptr(),
+                if std.is_empty() {
+                    std::ptr::null()
+                } else {
+                    std.as_ptr()
+                },
                 std.len(),
             )
         };
@@ -92,25 +137,25 @@ impl TransformPipeline {
         Ok(Self { raw })
     }
 
-    fn raw(&self) -> *mut sys::PtlTransformPipeline {
+    fn raw(&self) -> *mut sys::RtTransformPipeline {
         self.raw
     }
 }
 
 impl Drop for TransformPipeline {
     fn drop(&mut self) {
-        unsafe { sys::ptl_transform_pipeline_free(self.raw) }
+        unsafe { sys::rt_transform_pipeline_free(self.raw) }
     }
 }
 
 pub struct TensorDataset {
-    raw: *mut sys::PtlTensorDataset,
+    raw: *mut sys::RtTensorDataset,
 }
 
 impl TensorDataset {
     pub fn from_class_folders(root: impl AsRef<Path>) -> Result<Self, Error> {
         let root = path_to_cstring(root.as_ref())?;
-        let raw = unsafe { sys::ptl_tensor_dataset_new(root.as_ptr()) };
+        let raw = unsafe { sys::rt_tensor_dataset_new(root.as_ptr()) };
         if raw.is_null() {
             return Err(take_last_error());
         }
@@ -119,7 +164,7 @@ impl TensorDataset {
     }
 
     pub fn len(&self) -> usize {
-        unsafe { sys::ptl_tensor_dataset_len(self.raw) }
+        unsafe { sys::rt_tensor_dataset_len(self.raw) }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -127,11 +172,11 @@ impl TensorDataset {
     }
 
     pub fn class_names(&self) -> Result<Vec<String>, Error> {
-        let count = unsafe { sys::ptl_tensor_dataset_class_count(self.raw) };
+        let count = unsafe { sys::rt_tensor_dataset_class_count(self.raw) };
         let mut names = Vec::with_capacity(count);
 
         for index in 0..count {
-            let ptr = unsafe { sys::ptl_tensor_dataset_class_name(self.raw, index) };
+            let ptr = unsafe { sys::rt_tensor_dataset_class_name(self.raw, index) };
             if ptr.is_null() {
                 return Err(take_last_error());
             }
@@ -145,27 +190,27 @@ impl TensorDataset {
         Ok(names)
     }
 
-    fn raw(&self) -> *mut sys::PtlTensorDataset {
+    fn raw(&self) -> *mut sys::RtTensorDataset {
         self.raw
     }
 }
 
 impl Drop for TensorDataset {
     fn drop(&mut self) {
-        unsafe { sys::ptl_tensor_dataset_free(self.raw) }
+        unsafe { sys::rt_tensor_dataset_free(self.raw) }
     }
 }
 
 #[derive(Debug)]
 pub struct Batch {
-    raw: *mut sys::PtlOwnedBatch,
+    raw: *mut sys::RtOwnedBatch,
     shape: Vec<usize>,
 }
 
 impl Batch {
     pub fn data(&self) -> &[f32] {
-        let ptr = unsafe { sys::ptl_owned_batch_data(self.raw) };
-        let len = unsafe { sys::ptl_owned_batch_data_len(self.raw) };
+        let ptr = unsafe { sys::rt_owned_batch_data(self.raw) };
+        let len = unsafe { sys::rt_owned_batch_data_len(self.raw) };
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
@@ -174,20 +219,31 @@ impl Batch {
     }
 
     pub fn labels(&self) -> &[i64] {
-        let ptr = unsafe { sys::ptl_owned_batch_labels(self.raw) };
-        let len = unsafe { sys::ptl_owned_batch_labels_len(self.raw) };
+        let ptr = unsafe { sys::rt_owned_batch_labels(self.raw) };
+        let len = unsafe { sys::rt_owned_batch_labels_len(self.raw) };
         unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
+    /// Returns aggregate statistics computed by LibTorch over all batch elements.
+    pub fn statistics(&self) -> Result<Statistics, Error> {
+        let mut raw = sys::RtStatistics::default();
+        let ok = unsafe { sys::rt_owned_batch_statistics(self.raw, &mut raw) };
+        if !ok {
+            return Err(take_last_error());
+        }
+
+        Ok(statistics_from_raw(raw))
     }
 }
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        unsafe { sys::ptl_owned_batch_free(self.raw) }
+        unsafe { sys::rt_owned_batch_free(self.raw) }
     }
 }
 
 pub struct DataLoader<'a> {
-    raw: *mut sys::PtlDataLoader,
+    raw: *mut sys::RtDataLoader,
     _dataset: PhantomData<&'a TensorDataset>,
     _transforms: PhantomData<&'a TransformPipeline>,
 }
@@ -200,7 +256,7 @@ impl<'a> DataLoader<'a> {
         shuffle: bool,
     ) -> Result<Self, Error> {
         let raw = unsafe {
-            sys::ptl_data_loader_new(
+            sys::rt_data_loader_new(
                 dataset.raw(),
                 transforms.map(|t| t.raw()).unwrap_or(std::ptr::null_mut()),
                 batch_size,
@@ -220,7 +276,7 @@ impl<'a> DataLoader<'a> {
     }
 
     pub fn reset(&mut self) -> Result<(), Error> {
-        let ok = unsafe { sys::ptl_data_loader_reset(self.raw) };
+        let ok = unsafe { sys::rt_data_loader_reset(self.raw) };
         if ok {
             Ok(())
         } else {
@@ -231,13 +287,18 @@ impl<'a> DataLoader<'a> {
     pub fn next_batch(&mut self) -> Result<Option<Batch>, Error> {
         let mut batch = std::ptr::null_mut();
 
-        let status = unsafe { sys::ptl_data_loader_next(self.raw, &mut batch) };
+        let status = unsafe { sys::rt_data_loader_next(self.raw, &mut batch) };
         match status {
-            sys::PTL_STATUS_OK => {
+            sys::RT_STATUS_OK => {
+                if batch.is_null() {
+                    return Err(Error::Backend(
+                        "backend returned success without a batch".to_string(),
+                    ));
+                }
                 let raw_shape = unsafe {
                     std::slice::from_raw_parts(
-                        sys::ptl_owned_batch_shape(batch),
-                        sys::ptl_owned_batch_shape_len(batch),
+                        sys::rt_owned_batch_shape(batch),
+                        sys::rt_owned_batch_shape_len(batch),
                     )
                 };
                 let mut shape = Vec::with_capacity(raw_shape.len());
@@ -245,7 +306,7 @@ impl<'a> DataLoader<'a> {
                     let converted = match (*value).try_into() {
                         Ok(converted) => converted,
                         Err(_) => {
-                            unsafe { sys::ptl_owned_batch_free(batch) };
+                            unsafe { sys::rt_owned_batch_free(batch) };
                             return Err(Error::ShapeOverflow);
                         }
                     };
@@ -253,7 +314,7 @@ impl<'a> DataLoader<'a> {
                 }
                 Ok(Some(Batch { raw: batch, shape }))
             }
-            sys::PTL_STATUS_END => Ok(None),
+            sys::RT_STATUS_END => Ok(None),
             _ => Err(take_last_error()),
         }
     }
@@ -261,6 +322,33 @@ impl<'a> DataLoader<'a> {
 
 impl Drop for DataLoader<'_> {
     fn drop(&mut self) {
-        unsafe { sys::ptl_data_loader_free(self.raw) }
+        unsafe { sys::rt_data_loader_free(self.raw) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::statistics;
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn computes_statistics_with_libtorch() {
+        let result = statistics(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+
+        assert_eq!(result.count, 4);
+        assert_close(result.sum, 10.0);
+        assert_close(result.mean, 2.5);
+        assert_close(result.population_std, 1.25_f64.sqrt());
+        assert_close(result.sample_std, (5.0_f64 / 3.0).sqrt());
+        assert_close(result.min, 1.0);
+        assert_close(result.max, 4.0);
+    }
+
+    #[test]
+    fn rejects_empty_statistics_input() {
+        assert!(statistics(&[]).is_err());
     }
 }

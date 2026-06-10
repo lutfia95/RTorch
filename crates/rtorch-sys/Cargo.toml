@@ -1,9 +1,9 @@
 [package]
-name = "pytorch-loader-sys"
+name = "rtorch-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-links = "pytorch_loader_ffi"
+links = "rtorch_ffi"
 build = "build.rs"
 
 [build-dependencies]

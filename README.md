@@ -1,6 +1,6 @@
-# pytorch_loader
+# RTorch
 
-`pytorch_loader` is a Rust-facing data loading and preprocessing crate built on top of LibTorch.
+RTorch (`rtorch`) is a Rust-facing data loading and preprocessing crate built on top of LibTorch.
 
 The current goal of this repository is narrow and practical:
 
@@ -9,14 +9,16 @@ The current goal of this repository is narrow and practical:
 - batch and iterate samples from Rust
 - apply common tensor preprocessing through LibTorch before batching
 
-This is not a full Rust replacement for Python `torch.utils.data` yet. It is currently a small Rust API over a C ABI and C++ LibTorch backend.
+RTorch does not start Python or require the Python `torch` package. It does require
+LibTorch, which is PyTorch's C++ distribution. It is currently a small Rust API
+over a C ABI and C++ LibTorch backend.
 
 ## What Is Included
 
 The repository currently includes:
 
-- a safe Rust crate: `crates/pytorch-loader`
-- a low-level FFI crate: `crates/pytorch-loader-sys`
+- a safe Rust crate: `crates/rtorch`
+- a low-level FFI crate: `crates/rtorch-sys`
 - a C++17 LibTorch backend compiled through CMake
 - a dataset scanner for class-folder `.pt` tensor datasets
 - a transform pipeline with these operations:
@@ -32,6 +34,12 @@ The repository currently includes:
   - `len()`
   - `is_empty()`
   - `class_names()`
+- LibTorch-computed batch statistics:
+  - element count and sum
+  - mean
+  - population and sample standard deviation
+  - minimum and maximum
+- standalone Torch-backed statistics over Rust `f32` slices
 
 ## What Is Not Included Yet
 
@@ -52,7 +60,7 @@ That means the current project is best understood as a first LibTorch-backed ten
 
 The current stack is:
 
-`Rust safe API -> pytorch-loader-sys -> C ABI -> C++ LibTorch shim`
+`Rust safe API -> rtorch-sys -> C ABI -> C++ LibTorch shim`
 
 Why it is structured this way:
 
@@ -62,6 +70,17 @@ Why it is structured this way:
 - the C++ layer handles actual tensor loading and preprocessing using LibTorch
 
 This design keeps Rust code simpler and avoids binding the full LibTorch C++ surface directly.
+
+### Why There Is Still A Small Binding
+
+Rust cannot directly call arbitrary LibTorch C++ APIs as if they were Rust
+functions. C++ has no stable, portable ABI for templates, overloaded methods,
+exceptions, and objects such as `torch::Tensor`.
+
+RTorch therefore uses a deliberately small C ABI. Only the operations exposed by
+RTorch need wrapper functions; it does not generate or maintain bindings for all
+of LibTorch. Alternatives such as `cxx`, `autocxx`, or an existing crate still
+create an interop layer, even if some of it is generated.
 
 ## Dataset Format
 
@@ -128,6 +147,8 @@ The main Rust types are:
 - `TransformPipeline`
 - `DataLoader`
 - `Batch`
+- `Statistics`
+- `statistics(&[f32])`
 
 Typical flow:
 
@@ -136,10 +157,17 @@ Typical flow:
 3. Create a loader from the dataset and optional transforms.
 4. Pull batches in a loop with `next_batch()`.
 
+Statistics can also be computed without a dataset:
+
+```rust
+let stats = rtorch::statistics(&[1.0, 2.0, 3.0, 4.0])?;
+println!("mean={} std={}", stats.mean, stats.population_std);
+```
+
 ## Full Example
 
 ```rust
-use pytorch_loader::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
+use rtorch::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dataset = TensorDataset::from_class_folders("dataset")?;
@@ -162,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("batch shape: {:?}", batch.shape());
         println!("batch labels: {:?}", batch.labels());
         println!("flat element count: {}", batch.data().len());
+        println!("batch statistics: {:?}", batch.statistics()?);
     }
 
     Ok(())
@@ -341,12 +370,13 @@ If `shuffle` was enabled, reset reshuffles the sample order.
 
 ## How To Use `Batch`
 
-Each `Batch` gives you three pieces of information:
+Each `Batch` exposes data, shape, labels, and aggregate statistics:
 
 ```rust
 let shape = batch.shape();
 let labels = batch.labels();
 let data = batch.data();
+let statistics = batch.statistics()?;
 ```
 
 What they mean:
@@ -354,6 +384,11 @@ What they mean:
 - `shape()` returns the batch tensor shape as a Rust slice of `usize`
 - `labels()` returns the class label for each sample in the batch
 - `data()` returns the flattened tensor data as `&[f32]`
+- `statistics()` returns statistics computed by LibTorch across all elements in
+  the returned batch
+
+The `Statistics` value contains `count`, `sum`, `mean`, `population_std`,
+`sample_std`, `min`, and `max`.
 
 For a batch of image-like tensors, a shape might look like:
 
@@ -405,22 +440,22 @@ So this is appropriate for early experiments and API development, but not yet op
 Cargo.toml
 README.md
 crates/
-  pytorch-loader/
+  rtorch/
     src/lib.rs
     examples/tensor_folder.rs
-  pytorch-loader-sys/
+  rtorch-sys/
     src/lib.rs
     build.rs
     ffi/
-      include/pytorch_loader.h
-      src/pytorch_loader.cpp
+      include/rtorch.h
+      src/rtorch.cpp
       CMakeLists.txt
 ```
 
 Meaning:
 
-- `pytorch-loader`: safe Rust API
-- `pytorch-loader-sys`: raw FFI declarations and build integration
+- `rtorch`: safe Rust API
+- `rtorch-sys`: raw FFI declarations and build integration
 - `ffi/include`: C ABI header
 - `ffi/src`: C++ LibTorch implementation
 
@@ -436,7 +471,8 @@ A typical run looks like this:
    loads sample tensors from disk,
    applies transforms,
    stacks the tensors,
-   returns batch data and labels to Rust.
+   computes aggregate statistics with LibTorch,
+   returns batch data, labels, and statistics to Rust.
 
 ## Limitations
 
@@ -458,4 +494,3 @@ The next logical improvements are:
 - more transforms
 - cleaner tensor ownership across the FFI boundary
 - a clearer split between LibTorch-backed mode and any future native Rust mode
-

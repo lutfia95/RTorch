@@ -1,11 +1,13 @@
-#include "pytorch_loader.h"
+#include "rtorch.h"
 
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -31,7 +33,7 @@ struct TransformPipelineImpl {
   int64_t crop_h = 0;
   int64_t crop_w = 0;
   std::vector<float> mean;
-  std::vector<float> std;
+  std::vector<float> std_values;
 
   torch::Tensor apply(const torch::Tensor& input) const {
     torch::Tensor value = input;
@@ -69,8 +71,8 @@ struct TransformPipelineImpl {
       value = value.slice(1, top, top + crop_h).slice(2, left, left + crop_w);
     }
 
-    if (!mean.empty() || !std.empty()) {
-      if (mean.size() != std.size()) {
+    if (!mean.empty() || !std_values.empty()) {
+      if (mean.size() != std_values.size()) {
         throw std::runtime_error("normalize mean/std length mismatch");
       }
       if (value.dim() != 3) {
@@ -83,7 +85,8 @@ struct TransformPipelineImpl {
       auto mean_tensor =
           torch::tensor(mean, torch::TensorOptions().dtype(torch::kFloat32)).view({-1, 1, 1});
       auto std_tensor =
-          torch::tensor(std, torch::TensorOptions().dtype(torch::kFloat32)).view({-1, 1, 1});
+          torch::tensor(std_values, torch::TensorOptions().dtype(torch::kFloat32))
+              .view({-1, 1, 1});
       value = (value - mean_tensor) / std_tensor;
     }
 
@@ -100,6 +103,7 @@ struct BatchStorage {
   std::vector<float> data;
   std::vector<int64_t> shape;
   std::vector<int64_t> labels;
+  RtStatistics statistics{};
 };
 
 struct DataLoaderImpl {
@@ -187,40 +191,91 @@ torch::Tensor load_tensor_from_file(const fs::path& path) {
   return tensor;
 }
 
+RtStatistics calculate_statistics(const torch::Tensor& input) {
+  if (input.numel() == 0) {
+    throw std::runtime_error("statistics require at least one value");
+  }
+
+  auto source =
+      input
+          .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat64))
+          .contiguous();
+  const auto count = static_cast<size_t>(source.numel());
+
+  RtStatistics statistics{};
+  statistics.count = count;
+  statistics.sum = source.sum().item<double>();
+  statistics.mean = source.mean().item<double>();
+  auto deviations = source - statistics.mean;
+  const auto squared_deviation_sum =
+      (deviations * deviations).sum().item<double>();
+  statistics.population_std =
+      std::sqrt(squared_deviation_sum / static_cast<double>(count));
+  statistics.sample_std =
+      count > 1
+          ? std::sqrt(squared_deviation_sum / static_cast<double>(count - 1))
+          : 0.0;
+  statistics.min = source.min().item<double>();
+  statistics.max = source.max().item<double>();
+  return statistics;
+}
+
 }  // namespace
 
-struct PtlTransformPipeline {
+struct RtTransformPipeline {
   TransformPipelineImpl inner;
 };
 
-struct PtlTensorDataset {
+struct RtTensorDataset {
   TensorDatasetImpl inner;
 };
 
-struct PtlDataLoader {
+struct RtDataLoader {
   DataLoaderImpl inner;
 };
 
-struct PtlOwnedBatch {
+struct RtOwnedBatch {
   BatchStorage inner;
 };
 
-extern "C" const char* ptl_last_error_message(void) {
-  return protect<const char*>([]() {
-    char* message = static_cast<char*>(std::malloc(g_last_error.size() + 1));
-    if (message == nullptr) {
-      throw std::bad_alloc();
-    }
-    std::memcpy(message, g_last_error.c_str(), g_last_error.size() + 1);
-    return message;
-  }, nullptr);
+extern "C" char* rt_last_error_message(void) {
+  char* message = static_cast<char*>(std::malloc(g_last_error.size() + 1));
+  if (message == nullptr) {
+    return nullptr;
+  }
+  std::memcpy(message, g_last_error.c_str(), g_last_error.size() + 1);
+  return message;
 }
 
-extern "C" void ptl_last_error_free(char* message) {
+extern "C" void rt_last_error_free(char* message) {
   std::free(message);
 }
 
-extern "C" PtlTransformPipeline* ptl_transform_pipeline_new(
+extern "C" bool rt_statistics_f32(
+    const float* data,
+    size_t len,
+    RtStatistics* out) {
+  return protect<bool>([&]() {
+    if (len == 0) {
+      throw std::runtime_error("statistics require at least one value");
+    }
+    if (data == nullptr || out == nullptr) {
+      throw std::runtime_error("statistics data or output pointer was null");
+    }
+    if (len > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::runtime_error("statistics input is too large");
+    }
+
+    auto values = torch::from_blob(
+        const_cast<float*>(data),
+        {static_cast<int64_t>(len)},
+        torch::TensorOptions().dtype(torch::kFloat32));
+    *out = calculate_statistics(values);
+    return true;
+  }, false);
+}
+
+extern "C" RtTransformPipeline* rt_transform_pipeline_new(
     bool to_float,
     int64_t resize_h,
     int64_t resize_w,
@@ -228,10 +283,10 @@ extern "C" PtlTransformPipeline* ptl_transform_pipeline_new(
     int64_t crop_w,
     const float* mean,
     size_t mean_len,
-    const float* std,
-    size_t std_len) {
-  return protect<PtlTransformPipeline*>([&]() {
-    auto pipeline = std::make_unique<PtlTransformPipeline>();
+    const float* std_values,
+    size_t std_values_len) {
+  return protect<RtTransformPipeline*>([&]() {
+    auto pipeline = std::make_unique<RtTransformPipeline>();
     pipeline->inner.to_float = to_float;
     pipeline->inner.has_resize = resize_h > 0 && resize_w > 0;
     pipeline->inner.has_crop = crop_h > 0 && crop_w > 0;
@@ -239,32 +294,50 @@ extern "C" PtlTransformPipeline* ptl_transform_pipeline_new(
     pipeline->inner.resize_w = resize_w;
     pipeline->inner.crop_h = crop_h;
     pipeline->inner.crop_w = crop_w;
-    pipeline->inner.mean.assign(mean, mean + mean_len);
-    pipeline->inner.std.assign(std, std + std_len);
+    if (mean_len > 0) {
+      if (mean == nullptr) {
+        throw std::runtime_error("normalize mean pointer was null");
+      }
+      pipeline->inner.mean.assign(mean, mean + mean_len);
+    }
+    if (std_values_len > 0) {
+      if (std_values == nullptr) {
+        throw std::runtime_error("normalize std pointer was null");
+      }
+      pipeline->inner.std_values.assign(
+          std_values,
+          std_values + std_values_len);
+    }
+    if (std::any_of(
+            pipeline->inner.std_values.begin(),
+            pipeline->inner.std_values.end(),
+            [](float value) { return value == 0.0F; })) {
+      throw std::runtime_error("normalize std values must be non-zero");
+    }
     return pipeline.release();
   }, nullptr);
 }
 
-extern "C" void ptl_transform_pipeline_free(PtlTransformPipeline* pipeline) {
+extern "C" void rt_transform_pipeline_free(RtTransformPipeline* pipeline) {
   delete pipeline;
 }
 
-extern "C" PtlTensorDataset* ptl_tensor_dataset_new(const char* root) {
-  return protect<PtlTensorDataset*>([&]() {
+extern "C" RtTensorDataset* rt_tensor_dataset_new(const char* root) {
+  return protect<RtTensorDataset*>([&]() {
     if (root == nullptr) {
       throw std::runtime_error("dataset root pointer was null");
     }
-    auto dataset = std::make_unique<PtlTensorDataset>();
+    auto dataset = std::make_unique<RtTensorDataset>();
     scan_dataset_root(dataset->inner, fs::path(root));
     return dataset.release();
   }, nullptr);
 }
 
-extern "C" void ptl_tensor_dataset_free(PtlTensorDataset* dataset) {
+extern "C" void rt_tensor_dataset_free(RtTensorDataset* dataset) {
   delete dataset;
 }
 
-extern "C" size_t ptl_tensor_dataset_len(const PtlTensorDataset* dataset) {
+extern "C" size_t rt_tensor_dataset_len(const RtTensorDataset* dataset) {
   return protect<size_t>([&]() {
     if (dataset == nullptr) {
       throw std::runtime_error("dataset pointer was null");
@@ -273,7 +346,7 @@ extern "C" size_t ptl_tensor_dataset_len(const PtlTensorDataset* dataset) {
   }, 0);
 }
 
-extern "C" size_t ptl_tensor_dataset_class_count(const PtlTensorDataset* dataset) {
+extern "C" size_t rt_tensor_dataset_class_count(const RtTensorDataset* dataset) {
   return protect<size_t>([&]() {
     if (dataset == nullptr) {
       throw std::runtime_error("dataset pointer was null");
@@ -282,8 +355,8 @@ extern "C" size_t ptl_tensor_dataset_class_count(const PtlTensorDataset* dataset
   }, 0);
 }
 
-extern "C" const char* ptl_tensor_dataset_class_name(
-    const PtlTensorDataset* dataset,
+extern "C" const char* rt_tensor_dataset_class_name(
+    const RtTensorDataset* dataset,
     size_t class_index) {
   return protect<const char*>([&]() {
     if (dataset == nullptr) {
@@ -296,12 +369,12 @@ extern "C" const char* ptl_tensor_dataset_class_name(
   }, nullptr);
 }
 
-extern "C" PtlDataLoader* ptl_data_loader_new(
-    PtlTensorDataset* dataset,
-    PtlTransformPipeline* pipeline,
+extern "C" RtDataLoader* rt_data_loader_new(
+    RtTensorDataset* dataset,
+    RtTransformPipeline* pipeline,
     size_t batch_size,
     bool shuffle) {
-  return protect<PtlDataLoader*>([&]() {
+  return protect<RtDataLoader*>([&]() {
     if (dataset == nullptr) {
       throw std::runtime_error("dataset pointer was null");
     }
@@ -309,7 +382,7 @@ extern "C" PtlDataLoader* ptl_data_loader_new(
       throw std::runtime_error("batch_size must be greater than zero");
     }
 
-    auto loader = std::make_unique<PtlDataLoader>();
+    auto loader = std::make_unique<RtDataLoader>();
     loader->inner.dataset = &dataset->inner;
     loader->inner.pipeline = pipeline == nullptr ? nullptr : &pipeline->inner;
     loader->inner.batch_size = batch_size;
@@ -319,11 +392,11 @@ extern "C" PtlDataLoader* ptl_data_loader_new(
   }, nullptr);
 }
 
-extern "C" void ptl_data_loader_free(PtlDataLoader* loader) {
+extern "C" void rt_data_loader_free(RtDataLoader* loader) {
   delete loader;
 }
 
-extern "C" bool ptl_data_loader_reset(PtlDataLoader* loader) {
+extern "C" bool rt_data_loader_reset(RtDataLoader* loader) {
   return protect<bool>([&]() {
     if (loader == nullptr) {
       throw std::runtime_error("loader pointer was null");
@@ -333,14 +406,14 @@ extern "C" bool ptl_data_loader_reset(PtlDataLoader* loader) {
   }, false);
 }
 
-extern "C" int ptl_data_loader_next(PtlDataLoader* loader, PtlOwnedBatch** out) {
+extern "C" int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out) {
   return protect<int>([&]() {
     if (loader == nullptr || out == nullptr) {
       throw std::runtime_error("loader or batch output pointer was null");
     }
     if (loader->inner.cursor >= loader->inner.indices.size()) {
       *out = nullptr;
-      return PTL_STATUS_END;
+      return RT_STATUS_END;
     }
 
     const auto remaining = loader->inner.indices.size() - loader->inner.cursor;
@@ -352,7 +425,7 @@ extern "C" int ptl_data_loader_next(PtlDataLoader* loader, PtlOwnedBatch** out) 
     labels.reserve(take);
 
     for (size_t i = 0; i < take; ++i) {
-      const auto sample_index = loader->inner.indices[loader->inner.cursor++];
+      const auto sample_index = loader->inner.indices[loader->inner.cursor + i];
       const auto& sample = loader->inner.dataset->samples[sample_index];
       auto tensor = load_tensor_from_file(sample.path);
       if (loader->inner.pipeline != nullptr) {
@@ -362,45 +435,63 @@ extern "C" int ptl_data_loader_next(PtlDataLoader* loader, PtlOwnedBatch** out) 
       labels.push_back(sample.label);
     }
 
-    auto stacked = torch::stack(batch_tensors).contiguous().to(torch::kFloat32);
-    auto batch = std::make_unique<PtlOwnedBatch>();
-    batch->inner.shape.assign(stacked.sizes().begin(), stacked.sizes().end());
+    auto stacked = torch::stack(batch_tensors);
+    auto owned =
+        stacked
+            .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32))
+            .contiguous();
+    auto batch = std::make_unique<RtOwnedBatch>();
+    batch->inner.shape.assign(owned.sizes().begin(), owned.sizes().end());
     batch->inner.labels = std::move(labels);
 
-    const auto count = static_cast<size_t>(stacked.numel());
-    batch->inner.data.resize(count);
-    std::memcpy(batch->inner.data.data(), stacked.data_ptr<float>(), count * sizeof(float));
+    const auto count = static_cast<size_t>(owned.numel());
+    batch->inner.statistics = calculate_statistics(owned);
 
+    batch->inner.data.resize(count);
+    std::memcpy(batch->inner.data.data(), owned.data_ptr<float>(), count * sizeof(float));
+
+    loader->inner.cursor += take;
     *out = batch.release();
-    return PTL_STATUS_OK;
-  }, PTL_STATUS_ERR);
+    return RT_STATUS_OK;
+  }, RT_STATUS_ERR);
 }
 
-extern "C" const float* ptl_owned_batch_data(const PtlOwnedBatch* batch) {
+extern "C" const float* rt_owned_batch_data(const RtOwnedBatch* batch) {
   return batch == nullptr ? nullptr : batch->inner.data.data();
 }
 
-extern "C" size_t ptl_owned_batch_data_len(const PtlOwnedBatch* batch) {
+extern "C" size_t rt_owned_batch_data_len(const RtOwnedBatch* batch) {
   return batch == nullptr ? 0 : batch->inner.data.size();
 }
 
-extern "C" const int64_t* ptl_owned_batch_shape(const PtlOwnedBatch* batch) {
+extern "C" const int64_t* rt_owned_batch_shape(const RtOwnedBatch* batch) {
   return batch == nullptr ? nullptr : batch->inner.shape.data();
 }
 
-extern "C" size_t ptl_owned_batch_shape_len(const PtlOwnedBatch* batch) {
+extern "C" size_t rt_owned_batch_shape_len(const RtOwnedBatch* batch) {
   return batch == nullptr ? 0 : batch->inner.shape.size();
 }
 
-extern "C" const int64_t* ptl_owned_batch_labels(const PtlOwnedBatch* batch) {
+extern "C" const int64_t* rt_owned_batch_labels(const RtOwnedBatch* batch) {
   return batch == nullptr ? nullptr : batch->inner.labels.data();
 }
 
-extern "C" size_t ptl_owned_batch_labels_len(const PtlOwnedBatch* batch) {
+extern "C" size_t rt_owned_batch_labels_len(const RtOwnedBatch* batch) {
   return batch == nullptr ? 0 : batch->inner.labels.size();
 }
 
-extern "C" void ptl_owned_batch_free(PtlOwnedBatch* batch) {
+extern "C" bool rt_owned_batch_statistics(
+    const RtOwnedBatch* batch,
+    RtStatistics* out) {
+  if (batch == nullptr || out == nullptr) {
+    g_last_error = "batch or statistics output pointer was null";
+    return false;
+  }
+  *out = batch->inner.statistics;
+  return true;
+}
+
+extern "C" void rt_owned_batch_free(RtOwnedBatch* batch) {
   if (batch == nullptr) {
     return;
   }

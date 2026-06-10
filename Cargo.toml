@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pytorch-loader", "crates/pytorch-loader-sys"]
+members = ["crates/rtorch", "crates/rtorch-sys"]
 resolver = "2"
 
 [workspace.package]
@@ -7,5 +7,5 @@ edition = "2021"
 license = "MIT"
 version = "0.1.0"
 
-[workspace.metadata.pytorch-loader]
+[workspace.metadata.rtorch]
 libtorch-dir-env = "LIBTORCH"
