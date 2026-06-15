@@ -34,6 +34,7 @@ typedef struct RtTransformPipeline RtTransformPipeline;
 typedef struct RtTensorDataset RtTensorDataset;
 typedef struct RtDataLoader RtDataLoader;
 typedef struct RtOwnedBatch RtOwnedBatch;
+typedef struct RtTensor RtTensor;
 
 typedef struct RtStatistics {
   size_t count;
@@ -52,6 +53,48 @@ bool rt_statistics(
     size_t len,
     int scalar_type,
     RtStatistics* out);
+
+RtTensor* rt_tensor_from_data(
+    const void* data,
+    size_t len,
+    int scalar_type,
+    const int64_t* shape,
+    size_t shape_len,
+    bool requires_grad);
+RtTensor* rt_tensor_zeros(
+    const int64_t* shape,
+    size_t shape_len,
+    int scalar_type,
+    bool requires_grad);
+RtTensor* rt_tensor_ones(
+    const int64_t* shape,
+    size_t shape_len,
+    int scalar_type,
+    bool requires_grad);
+RtTensor* rt_tensor_clone(const RtTensor* tensor);
+void rt_tensor_free(RtTensor* tensor);
+size_t rt_tensor_numel(const RtTensor* tensor);
+size_t rt_tensor_shape_len(const RtTensor* tensor);
+bool rt_tensor_copy_shape(
+    const RtTensor* tensor,
+    int64_t* out,
+    size_t out_len);
+int rt_tensor_scalar_type(const RtTensor* tensor);
+bool rt_tensor_requires_grad(const RtTensor* tensor);
+bool rt_tensor_set_requires_grad(RtTensor* tensor, bool requires_grad);
+bool rt_tensor_copy_f32(
+    const RtTensor* tensor,
+    float* out,
+    size_t out_len);
+RtTensor* rt_tensor_add(const RtTensor* left, const RtTensor* right);
+RtTensor* rt_tensor_matmul(const RtTensor* left, const RtTensor* right);
+RtTensor* rt_tensor_reshape(
+    const RtTensor* tensor,
+    const int64_t* shape,
+    size_t shape_len);
+RtTensor* rt_tensor_sum(const RtTensor* tensor);
+bool rt_tensor_backward(RtTensor* tensor);
+RtTensor* rt_tensor_grad(const RtTensor* tensor);
 
 RtTransformPipeline* rt_transform_pipeline_new(
     bool to_float,
@@ -87,6 +130,7 @@ size_t rt_owned_batch_shape_len(const RtOwnedBatch* batch);
 const int64_t* rt_owned_batch_labels(const RtOwnedBatch* batch);
 size_t rt_owned_batch_labels_len(const RtOwnedBatch* batch);
 bool rt_owned_batch_statistics(const RtOwnedBatch* batch, RtStatistics* out);
+RtTensor* rt_owned_batch_tensor(const RtOwnedBatch* batch);
 void rt_owned_batch_free(RtOwnedBatch* batch);
 
 #ifdef __cplusplus

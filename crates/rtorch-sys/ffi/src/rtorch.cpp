@@ -100,6 +100,7 @@ struct TensorDatasetImpl {
 };
 
 struct BatchStorage {
+  torch::Tensor tensor;
   std::vector<float> data;
   std::vector<int64_t> shape;
   std::vector<int64_t> labels;
@@ -234,12 +235,14 @@ c10::ScalarType scalar_type_from_ffi(int scalar_type) {
       return c10::kInt;
     case RT_SCALAR_I64:
       return c10::kLong;
+#ifdef RTORCH_HAS_EXTENDED_UNSIGNED_TYPES
     case RT_SCALAR_U16:
       return c10::kUInt16;
     case RT_SCALAR_U32:
       return c10::kUInt32;
     case RT_SCALAR_U64:
       return c10::kUInt64;
+#endif
     case RT_SCALAR_F16:
       return c10::kHalf;
     case RT_SCALAR_BF16:
@@ -251,6 +254,103 @@ c10::ScalarType scalar_type_from_ffi(int scalar_type) {
     default:
       throw std::runtime_error("unsupported statistics scalar type");
   }
+}
+
+int scalar_type_to_ffi(c10::ScalarType scalar_type) {
+  switch (scalar_type) {
+    case c10::kBool:
+      return RT_SCALAR_BOOL;
+    case c10::kByte:
+      return RT_SCALAR_U8;
+    case c10::kChar:
+      return RT_SCALAR_I8;
+    case c10::kShort:
+      return RT_SCALAR_I16;
+    case c10::kInt:
+      return RT_SCALAR_I32;
+    case c10::kLong:
+      return RT_SCALAR_I64;
+#ifdef RTORCH_HAS_EXTENDED_UNSIGNED_TYPES
+    case c10::kUInt16:
+      return RT_SCALAR_U16;
+    case c10::kUInt32:
+      return RT_SCALAR_U32;
+    case c10::kUInt64:
+      return RT_SCALAR_U64;
+#endif
+    case c10::kHalf:
+      return RT_SCALAR_F16;
+    case c10::kBFloat16:
+      return RT_SCALAR_BF16;
+    case c10::kFloat:
+      return RT_SCALAR_F32;
+    case c10::kDouble:
+      return RT_SCALAR_F64;
+    default:
+      throw std::runtime_error("unsupported tensor scalar type");
+  }
+}
+
+std::vector<int64_t> copy_shape(const int64_t* shape, size_t shape_len) {
+  if (shape_len == 0) {
+    return {};
+  }
+  if (shape == nullptr) {
+    throw std::runtime_error("tensor shape pointer was null");
+  }
+  std::vector<int64_t> result(shape, shape + shape_len);
+  if (std::any_of(
+          result.begin(),
+          result.end(),
+          [](int64_t value) { return value < 0; })) {
+    throw std::runtime_error("tensor shape dimensions must be non-negative");
+  }
+  return result;
+}
+
+size_t shape_numel(const std::vector<int64_t>& shape) {
+  size_t count = 1;
+  for (const auto dimension : shape) {
+    const auto value = static_cast<size_t>(dimension);
+    if (value != 0 && count > std::numeric_limits<size_t>::max() / value) {
+      throw std::runtime_error("tensor shape element count overflowed");
+    }
+    count *= value;
+  }
+  return count;
+}
+
+template <typename T>
+torch::Tensor unsigned_statistics_tensor(const void* data, size_t len) {
+  const auto* source = static_cast<const T*>(data);
+  std::vector<double> converted(source, source + len);
+  return torch::from_blob(
+             converted.data(),
+             {static_cast<int64_t>(len)},
+             torch::TensorOptions().dtype(torch::kFloat64))
+      .clone();
+}
+
+torch::Tensor statistics_tensor_from_data(
+    const void* data,
+    size_t len,
+    int scalar_type) {
+#ifndef RTORCH_HAS_EXTENDED_UNSIGNED_TYPES
+  switch (scalar_type) {
+    case RT_SCALAR_U16:
+      return unsigned_statistics_tensor<uint16_t>(data, len);
+    case RT_SCALAR_U32:
+      return unsigned_statistics_tensor<uint32_t>(data, len);
+    case RT_SCALAR_U64:
+      return unsigned_statistics_tensor<uint64_t>(data, len);
+    default:
+      break;
+  }
+#endif
+  return torch::from_blob(
+      const_cast<void*>(data),
+      {static_cast<int64_t>(len)},
+      torch::TensorOptions().dtype(scalar_type_from_ffi(scalar_type)));
 }
 
 }  // namespace
@@ -269,6 +369,10 @@ struct RtDataLoader {
 
 struct RtOwnedBatch {
   BatchStorage inner;
+};
+
+struct RtTensor {
+  torch::Tensor inner;
 };
 
 extern "C" char* rt_last_error_message(void) {
@@ -300,13 +404,261 @@ extern "C" bool rt_statistics(
       throw std::runtime_error("statistics input is too large");
     }
 
-    auto values = torch::from_blob(
-        const_cast<void*>(data),
-        {static_cast<int64_t>(len)},
-        torch::TensorOptions().dtype(scalar_type_from_ffi(scalar_type)));
+    auto values = statistics_tensor_from_data(data, len, scalar_type);
     *out = calculate_statistics(values);
     return true;
   }, false);
+}
+
+extern "C" RtTensor* rt_tensor_from_data(
+    const void* data,
+    size_t len,
+    int scalar_type,
+    const int64_t* shape,
+    size_t shape_len,
+    bool requires_grad) {
+  return protect<RtTensor*>([&]() {
+    const auto dimensions = copy_shape(shape, shape_len);
+    if (shape_numel(dimensions) != len) {
+      throw std::runtime_error("tensor data length does not match shape");
+    }
+    if (len > 0 && data == nullptr) {
+      throw std::runtime_error("tensor data pointer was null");
+    }
+
+    const auto options =
+        torch::TensorOptions().dtype(scalar_type_from_ffi(scalar_type));
+    torch::Tensor tensor;
+    if (len == 0) {
+      tensor = torch::empty(dimensions, options);
+    } else {
+      tensor =
+          torch::from_blob(const_cast<void*>(data), dimensions, options).clone();
+    }
+    tensor.set_requires_grad(requires_grad);
+
+    auto result = std::make_unique<RtTensor>();
+    result->inner = std::move(tensor);
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_zeros(
+    const int64_t* shape,
+    size_t shape_len,
+    int scalar_type,
+    bool requires_grad) {
+  return protect<RtTensor*>([&]() {
+    const auto dimensions = copy_shape(shape, shape_len);
+    auto result = std::make_unique<RtTensor>();
+    result->inner = torch::zeros(
+        dimensions,
+        torch::TensorOptions()
+            .dtype(scalar_type_from_ffi(scalar_type))
+            .requires_grad(requires_grad));
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_ones(
+    const int64_t* shape,
+    size_t shape_len,
+    int scalar_type,
+    bool requires_grad) {
+  return protect<RtTensor*>([&]() {
+    const auto dimensions = copy_shape(shape, shape_len);
+    auto result = std::make_unique<RtTensor>();
+    result->inner = torch::ones(
+        dimensions,
+        torch::TensorOptions()
+            .dtype(scalar_type_from_ffi(scalar_type))
+            .requires_grad(requires_grad));
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_clone(const RtTensor* tensor) {
+  return protect<RtTensor*>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    auto result = std::make_unique<RtTensor>();
+    result->inner = tensor->inner;
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" void rt_tensor_free(RtTensor* tensor) {
+  delete tensor;
+}
+
+extern "C" size_t rt_tensor_numel(const RtTensor* tensor) {
+  return protect<size_t>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    return static_cast<size_t>(tensor->inner.numel());
+  }, 0);
+}
+
+extern "C" size_t rt_tensor_shape_len(const RtTensor* tensor) {
+  return protect<size_t>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    return static_cast<size_t>(tensor->inner.dim());
+  }, 0);
+}
+
+extern "C" bool rt_tensor_copy_shape(
+    const RtTensor* tensor,
+    int64_t* out,
+    size_t out_len) {
+  return protect<bool>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    const auto sizes = tensor->inner.sizes();
+    if (out_len != static_cast<size_t>(sizes.size())) {
+      throw std::runtime_error("tensor shape output length mismatch");
+    }
+    if (out_len > 0 && out == nullptr) {
+      throw std::runtime_error("tensor shape output pointer was null");
+    }
+    if (out_len > 0) {
+      std::copy(sizes.begin(), sizes.end(), out);
+    }
+    return true;
+  }, false);
+}
+
+extern "C" int rt_tensor_scalar_type(const RtTensor* tensor) {
+  return protect<int>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    return scalar_type_to_ffi(tensor->inner.scalar_type());
+  }, -1);
+}
+
+extern "C" bool rt_tensor_requires_grad(const RtTensor* tensor) {
+  return tensor != nullptr && tensor->inner.requires_grad();
+}
+
+extern "C" bool rt_tensor_set_requires_grad(
+    RtTensor* tensor,
+    bool requires_grad) {
+  return protect<bool>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    tensor->inner.set_requires_grad(requires_grad);
+    return true;
+  }, false);
+}
+
+extern "C" bool rt_tensor_copy_f32(
+    const RtTensor* tensor,
+    float* out,
+    size_t out_len) {
+  return protect<bool>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    const auto source =
+        tensor->inner
+            .detach()
+            .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32))
+            .contiguous();
+    const auto count = static_cast<size_t>(source.numel());
+    if (out_len != count) {
+      throw std::runtime_error("tensor data output length mismatch");
+    }
+    if (count > 0 && out == nullptr) {
+      throw std::runtime_error("tensor data output pointer was null");
+    }
+    if (count > 0) {
+      std::memcpy(out, source.data_ptr<float>(), count * sizeof(float));
+    }
+    return true;
+  }, false);
+}
+
+extern "C" RtTensor* rt_tensor_add(
+    const RtTensor* left,
+    const RtTensor* right) {
+  return protect<RtTensor*>([&]() {
+    if (left == nullptr || right == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    auto result = std::make_unique<RtTensor>();
+    result->inner = left->inner + right->inner;
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_matmul(
+    const RtTensor* left,
+    const RtTensor* right) {
+  return protect<RtTensor*>([&]() {
+    if (left == nullptr || right == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    auto result = std::make_unique<RtTensor>();
+    result->inner = torch::matmul(left->inner, right->inner);
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_reshape(
+    const RtTensor* tensor,
+    const int64_t* shape,
+    size_t shape_len) {
+  return protect<RtTensor*>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    const auto dimensions = copy_shape(shape, shape_len);
+    auto result = std::make_unique<RtTensor>();
+    result->inner = tensor->inner.reshape(dimensions);
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_sum(const RtTensor* tensor) {
+  return protect<RtTensor*>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    auto result = std::make_unique<RtTensor>();
+    result->inner = tensor->inner.sum();
+    return result.release();
+  }, nullptr);
+}
+
+extern "C" bool rt_tensor_backward(RtTensor* tensor) {
+  return protect<bool>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    tensor->inner.backward();
+    return true;
+  }, false);
+}
+
+extern "C" RtTensor* rt_tensor_grad(const RtTensor* tensor) {
+  return protect<RtTensor*>([&]() {
+    if (tensor == nullptr) {
+      throw std::runtime_error("tensor pointer was null");
+    }
+    const auto gradient = tensor->inner.grad();
+    if (!gradient.defined()) {
+      throw std::runtime_error("tensor gradient is not defined");
+    }
+    auto result = std::make_unique<RtTensor>();
+    result->inner = gradient.clone();
+    return result.release();
+  }, nullptr);
 }
 
 extern "C" RtTransformPipeline* rt_transform_pipeline_new(
@@ -475,6 +827,7 @@ extern "C" int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out) {
             .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32))
             .contiguous();
     auto batch = std::make_unique<RtOwnedBatch>();
+    batch->inner.tensor = owned;
     batch->inner.shape.assign(owned.sizes().begin(), owned.sizes().end());
     batch->inner.labels = std::move(labels);
 
@@ -523,6 +876,17 @@ extern "C" bool rt_owned_batch_statistics(
   }
   *out = batch->inner.statistics;
   return true;
+}
+
+extern "C" RtTensor* rt_owned_batch_tensor(const RtOwnedBatch* batch) {
+  return protect<RtTensor*>([&]() {
+    if (batch == nullptr) {
+      throw std::runtime_error("batch pointer was null");
+    }
+    auto tensor = std::make_unique<RtTensor>();
+    tensor->inner = batch->inner.tensor;
+    return tensor.release();
+  }, nullptr);
 }
 
 extern "C" void rt_owned_batch_free(RtOwnedBatch* batch) {

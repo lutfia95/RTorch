@@ -39,6 +39,11 @@ pub struct RtOwnedBatch {
 }
 
 #[repr(C)]
+pub struct RtTensor {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RtStatistics {
     pub count: usize,
@@ -59,6 +64,46 @@ unsafe extern "C" {
         scalar_type: c_int,
         out: *mut RtStatistics,
     ) -> bool;
+
+    pub fn rt_tensor_from_data(
+        data: *const std::ffi::c_void,
+        len: usize,
+        scalar_type: c_int,
+        shape: *const i64,
+        shape_len: usize,
+        requires_grad: bool,
+    ) -> *mut RtTensor;
+    pub fn rt_tensor_zeros(
+        shape: *const i64,
+        shape_len: usize,
+        scalar_type: c_int,
+        requires_grad: bool,
+    ) -> *mut RtTensor;
+    pub fn rt_tensor_ones(
+        shape: *const i64,
+        shape_len: usize,
+        scalar_type: c_int,
+        requires_grad: bool,
+    ) -> *mut RtTensor;
+    pub fn rt_tensor_clone(tensor: *const RtTensor) -> *mut RtTensor;
+    pub fn rt_tensor_free(tensor: *mut RtTensor);
+    pub fn rt_tensor_numel(tensor: *const RtTensor) -> usize;
+    pub fn rt_tensor_shape_len(tensor: *const RtTensor) -> usize;
+    pub fn rt_tensor_copy_shape(tensor: *const RtTensor, out: *mut i64, out_len: usize) -> bool;
+    pub fn rt_tensor_scalar_type(tensor: *const RtTensor) -> c_int;
+    pub fn rt_tensor_requires_grad(tensor: *const RtTensor) -> bool;
+    pub fn rt_tensor_set_requires_grad(tensor: *mut RtTensor, requires_grad: bool) -> bool;
+    pub fn rt_tensor_copy_f32(tensor: *const RtTensor, out: *mut f32, out_len: usize) -> bool;
+    pub fn rt_tensor_add(left: *const RtTensor, right: *const RtTensor) -> *mut RtTensor;
+    pub fn rt_tensor_matmul(left: *const RtTensor, right: *const RtTensor) -> *mut RtTensor;
+    pub fn rt_tensor_reshape(
+        tensor: *const RtTensor,
+        shape: *const i64,
+        shape_len: usize,
+    ) -> *mut RtTensor;
+    pub fn rt_tensor_sum(tensor: *const RtTensor) -> *mut RtTensor;
+    pub fn rt_tensor_backward(tensor: *mut RtTensor) -> bool;
+    pub fn rt_tensor_grad(tensor: *const RtTensor) -> *mut RtTensor;
 
     pub fn rt_transform_pipeline_new(
         to_float: bool,
@@ -98,9 +143,7 @@ unsafe extern "C" {
     pub fn rt_owned_batch_shape_len(batch: *const RtOwnedBatch) -> usize;
     pub fn rt_owned_batch_labels(batch: *const RtOwnedBatch) -> *const i64;
     pub fn rt_owned_batch_labels_len(batch: *const RtOwnedBatch) -> usize;
-    pub fn rt_owned_batch_statistics(
-        batch: *const RtOwnedBatch,
-        out: *mut RtStatistics,
-    ) -> bool;
+    pub fn rt_owned_batch_statistics(batch: *const RtOwnedBatch, out: *mut RtStatistics) -> bool;
+    pub fn rt_owned_batch_tensor(batch: *const RtOwnedBatch) -> *mut RtTensor;
     pub fn rt_owned_batch_free(batch: *mut RtOwnedBatch);
 }

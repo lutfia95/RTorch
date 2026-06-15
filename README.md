@@ -20,6 +20,9 @@ The repository currently includes:
 - a safe Rust crate: `crates/rtorch`
 - a low-level FFI crate: `crates/rtorch-sys`
 - a C++17 LibTorch backend compiled through CMake
+- an owned `Tensor` handle that preserves LibTorch tensor and autograd state
+- basic tensor construction, inspection, addition, matrix multiplication,
+  reshape, sum, backward, and gradient access
 - a dataset scanner for class-folder `.pt` tensor datasets
 - a transform pipeline with these operations:
   - `to_float`
@@ -53,6 +56,8 @@ The crate does not currently include:
 - random crop, horizontal flip, color jitter, or augmentation-heavy transforms
 - generic custom dataset traits on the Rust side
 - direct zero-copy exposure of LibTorch tensors to Rust
+- neural-network module, optimizer, scheduler, CUDA, distributed-training, or
+  TorchScript model APIs
 
 That means the current project is best understood as a first LibTorch-backed tensor dataset loader for Rust, not a full training input pipeline framework.
 
@@ -159,6 +164,13 @@ On Linux, the LibTorch shared-library directory may also need to be added to
 
 ```bash
 export LD_LIBRARY_PATH="$LIBTORCH/lib:$LD_LIBRARY_PATH"
+```
+
+On macOS, use `DYLD_LIBRARY_PATH` when the LibTorch package does not provide an
+install-time runtime path:
+
+```bash
+export DYLD_LIBRARY_PATH="$LIBTORCH/lib:$DYLD_LIBRARY_PATH"
 ```
 
 ## Usage Examples
@@ -392,6 +404,8 @@ For shape `[8, 3, 224, 224]`, the flat slice contains
 
 The main Rust types are:
 
+- `Tensor`
+- `ScalarType`
 - `TensorDataset`
 - `TransformConfig`
 - `TransformPipeline`
@@ -414,6 +428,25 @@ Statistics can also be computed without a dataset:
 let stats = rtorch::statistics(&[1.0, 2.0, 3.0, 4.0])?;
 println!("mean={} std={}", stats.mean, stats.population_std);
 ```
+
+### Owned Tensors And Autograd
+
+`Tensor` keeps its underlying LibTorch tensor alive behind the Rust API:
+
+```rust
+use rtorch::Tensor;
+
+let input = Tensor::from_slice(&[1.0_f32, 2.0, 3.0], &[3], true)?;
+let doubled = input.add(&input)?;
+let mut total = doubled.sum()?;
+total.backward()?;
+
+assert_eq!(input.grad()?.to_vec_f32()?, vec![2.0, 2.0, 2.0]);
+# Ok::<(), rtorch::Error>(())
+```
+
+This is the foundation for broader model and training support. It is not yet a
+complete replacement for Python PyTorch.
 
 ## Full Example
 

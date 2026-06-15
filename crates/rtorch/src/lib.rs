@@ -12,6 +12,8 @@ pub enum Error {
     Backend(String),
     InvalidUtf8Path,
     ShapeOverflow,
+    ShapeElementMismatch { expected: usize, actual: usize },
+    UnsupportedScalarType(i32),
 }
 
 impl Display for Error {
@@ -21,6 +23,13 @@ impl Display for Error {
             Self::Backend(msg) => write!(f, "{msg}"),
             Self::InvalidUtf8Path => write!(f, "path is not valid UTF-8"),
             Self::ShapeOverflow => write!(f, "tensor shape value overflowed usize"),
+            Self::ShapeElementMismatch { expected, actual } => write!(
+                f,
+                "tensor shape requires {expected} elements but received {actual}"
+            ),
+            Self::UnsupportedScalarType(value) => {
+                write!(f, "backend returned unsupported scalar type {value}")
+            }
         }
     }
 }
@@ -45,9 +54,7 @@ fn take_last_error() -> Error {
             return Error::Backend("unknown backend error".to_string());
         }
 
-        let message = std::ffi::CStr::from_ptr(ptr)
-            .to_string_lossy()
-            .into_owned();
+        let message = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
         sys::rt_last_error_free(ptr);
         Error::Backend(message)
     }
@@ -95,6 +102,9 @@ pub trait StatisticsElement: private::Sealed {
     const SCALAR_TYPE: i32;
 }
 
+/// A Rust scalar type that can be copied into an owned LibTorch tensor.
+pub trait TensorElement: StatisticsElement {}
+
 macro_rules! impl_statistics_element {
     ($type:ty, $scalar_type:expr) => {
         impl private::Sealed for $type {}
@@ -127,6 +137,224 @@ impl_statistics_element!(usize, sys::RT_SCALAR_U64);
 impl_statistics_element!(isize, sys::RT_SCALAR_I32);
 #[cfg(target_pointer_width = "64")]
 impl_statistics_element!(isize, sys::RT_SCALAR_I64);
+
+impl<T: StatisticsElement> TensorElement for T {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum ScalarType {
+    Bool = sys::RT_SCALAR_BOOL,
+    U8 = sys::RT_SCALAR_U8,
+    I8 = sys::RT_SCALAR_I8,
+    I16 = sys::RT_SCALAR_I16,
+    I32 = sys::RT_SCALAR_I32,
+    I64 = sys::RT_SCALAR_I64,
+    U16 = sys::RT_SCALAR_U16,
+    U32 = sys::RT_SCALAR_U32,
+    U64 = sys::RT_SCALAR_U64,
+    F16 = sys::RT_SCALAR_F16,
+    BF16 = sys::RT_SCALAR_BF16,
+    F32 = sys::RT_SCALAR_F32,
+    F64 = sys::RT_SCALAR_F64,
+}
+
+impl TryFrom<i32> for ScalarType {
+    type Error = Error;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            sys::RT_SCALAR_BOOL => Ok(Self::Bool),
+            sys::RT_SCALAR_U8 => Ok(Self::U8),
+            sys::RT_SCALAR_I8 => Ok(Self::I8),
+            sys::RT_SCALAR_I16 => Ok(Self::I16),
+            sys::RT_SCALAR_I32 => Ok(Self::I32),
+            sys::RT_SCALAR_I64 => Ok(Self::I64),
+            sys::RT_SCALAR_U16 => Ok(Self::U16),
+            sys::RT_SCALAR_U32 => Ok(Self::U32),
+            sys::RT_SCALAR_U64 => Ok(Self::U64),
+            sys::RT_SCALAR_F16 => Ok(Self::F16),
+            sys::RT_SCALAR_BF16 => Ok(Self::BF16),
+            sys::RT_SCALAR_F32 => Ok(Self::F32),
+            sys::RT_SCALAR_F64 => Ok(Self::F64),
+            _ => Err(Error::UnsupportedScalarType(value)),
+        }
+    }
+}
+
+fn checked_shape(shape: &[usize]) -> Result<(Vec<i64>, usize), Error> {
+    let mut raw = Vec::with_capacity(shape.len());
+    let mut count = 1usize;
+    for dimension in shape {
+        raw.push((*dimension).try_into().map_err(|_| Error::ShapeOverflow)?);
+        count = count.checked_mul(*dimension).ok_or(Error::ShapeOverflow)?;
+    }
+    Ok((raw, count))
+}
+
+/// An owned LibTorch tensor that preserves dtype, shape, and autograd state.
+pub struct Tensor {
+    raw: *mut sys::RtTensor,
+}
+
+impl Tensor {
+    fn from_raw(raw: *mut sys::RtTensor) -> Result<Self, Error> {
+        if raw.is_null() {
+            Err(take_last_error())
+        } else {
+            Ok(Self { raw })
+        }
+    }
+
+    pub fn from_slice<T: TensorElement>(
+        values: &[T],
+        shape: &[usize],
+        requires_grad: bool,
+    ) -> Result<Self, Error> {
+        let (raw_shape, expected) = checked_shape(shape)?;
+        if expected != values.len() {
+            return Err(Error::ShapeElementMismatch {
+                expected,
+                actual: values.len(),
+            });
+        }
+        let data = if values.is_empty() {
+            std::ptr::null()
+        } else {
+            values.as_ptr().cast()
+        };
+        Self::from_raw(unsafe {
+            sys::rt_tensor_from_data(
+                data,
+                values.len(),
+                T::SCALAR_TYPE,
+                raw_shape.as_ptr(),
+                raw_shape.len(),
+                requires_grad,
+            )
+        })
+    }
+
+    pub fn zeros(
+        shape: &[usize],
+        scalar_type: ScalarType,
+        requires_grad: bool,
+    ) -> Result<Self, Error> {
+        let (raw_shape, _) = checked_shape(shape)?;
+        Self::from_raw(unsafe {
+            sys::rt_tensor_zeros(
+                raw_shape.as_ptr(),
+                raw_shape.len(),
+                scalar_type as i32,
+                requires_grad,
+            )
+        })
+    }
+
+    pub fn ones(
+        shape: &[usize],
+        scalar_type: ScalarType,
+        requires_grad: bool,
+    ) -> Result<Self, Error> {
+        let (raw_shape, _) = checked_shape(shape)?;
+        Self::from_raw(unsafe {
+            sys::rt_tensor_ones(
+                raw_shape.as_ptr(),
+                raw_shape.len(),
+                scalar_type as i32,
+                requires_grad,
+            )
+        })
+    }
+
+    pub fn try_clone(&self) -> Result<Self, Error> {
+        Self::from_raw(unsafe { sys::rt_tensor_clone(self.raw) })
+    }
+
+    pub fn numel(&self) -> usize {
+        unsafe { sys::rt_tensor_numel(self.raw) }
+    }
+
+    pub fn shape(&self) -> Result<Vec<usize>, Error> {
+        let len = unsafe { sys::rt_tensor_shape_len(self.raw) };
+        let mut raw = vec![0_i64; len];
+        let ok = unsafe { sys::rt_tensor_copy_shape(self.raw, raw.as_mut_ptr(), raw.len()) };
+        if !ok {
+            return Err(take_last_error());
+        }
+        raw.into_iter()
+            .map(|value| value.try_into().map_err(|_| Error::ShapeOverflow))
+            .collect()
+    }
+
+    pub fn scalar_type(&self) -> Result<ScalarType, Error> {
+        ScalarType::try_from(unsafe { sys::rt_tensor_scalar_type(self.raw) })
+    }
+
+    pub fn requires_grad(&self) -> bool {
+        unsafe { sys::rt_tensor_requires_grad(self.raw) }
+    }
+
+    pub fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), Error> {
+        if unsafe { sys::rt_tensor_set_requires_grad(self.raw, requires_grad) } {
+            Ok(())
+        } else {
+            Err(take_last_error())
+        }
+    }
+
+    pub fn to_vec_f32(&self) -> Result<Vec<f32>, Error> {
+        let mut values = vec![0.0_f32; self.numel()];
+        let ok = unsafe { sys::rt_tensor_copy_f32(self.raw, values.as_mut_ptr(), values.len()) };
+        if ok {
+            Ok(values)
+        } else {
+            Err(take_last_error())
+        }
+    }
+
+    pub fn add(&self, other: &Self) -> Result<Self, Error> {
+        Self::from_raw(unsafe { sys::rt_tensor_add(self.raw, other.raw) })
+    }
+
+    pub fn matmul(&self, other: &Self) -> Result<Self, Error> {
+        Self::from_raw(unsafe { sys::rt_tensor_matmul(self.raw, other.raw) })
+    }
+
+    pub fn reshape(&self, shape: &[usize]) -> Result<Self, Error> {
+        let (raw_shape, expected) = checked_shape(shape)?;
+        if expected != self.numel() {
+            return Err(Error::ShapeElementMismatch {
+                expected,
+                actual: self.numel(),
+            });
+        }
+        Self::from_raw(unsafe {
+            sys::rt_tensor_reshape(self.raw, raw_shape.as_ptr(), raw_shape.len())
+        })
+    }
+
+    pub fn sum(&self) -> Result<Self, Error> {
+        Self::from_raw(unsafe { sys::rt_tensor_sum(self.raw) })
+    }
+
+    pub fn backward(&mut self) -> Result<(), Error> {
+        if unsafe { sys::rt_tensor_backward(self.raw) } {
+            Ok(())
+        } else {
+            Err(take_last_error())
+        }
+    }
+
+    pub fn grad(&self) -> Result<Self, Error> {
+        Self::from_raw(unsafe { sys::rt_tensor_grad(self.raw) })
+    }
+}
+
+impl Drop for Tensor {
+    fn drop(&mut self) {
+        unsafe { sys::rt_tensor_free(self.raw) }
+    }
+}
 
 /// Computes aggregate statistics with LibTorch over a supported Rust slice.
 pub fn statistics<T: StatisticsElement>(values: &[T]) -> Result<Statistics, Error> {
@@ -278,6 +506,11 @@ impl Batch {
 
         Ok(statistics_from_raw(raw))
     }
+
+    /// Returns an owned LibTorch tensor containing the batch data.
+    pub fn tensor(&self) -> Result<Tensor, Error> {
+        Tensor::from_raw(unsafe { sys::rt_owned_batch_tensor(self.raw) })
+    }
 }
 
 impl Drop for Batch {
@@ -372,7 +605,7 @@ impl Drop for DataLoader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bf16, f16, statistics};
+    use super::{bf16, f16, statistics, ScalarType, Tensor};
 
     fn assert_close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1.0e-12);
@@ -414,12 +647,8 @@ mod tests {
 
     #[test]
     fn computes_reduced_float_statistics_with_libtorch() {
-        let float16 = statistics(&[
-            f16::from_f32(1.0),
-            f16::from_f32(2.0),
-            f16::from_f32(3.0),
-        ])
-        .unwrap();
+        let float16 =
+            statistics(&[f16::from_f32(1.0), f16::from_f32(2.0), f16::from_f32(3.0)]).unwrap();
         let bfloat16 = statistics(&[
             bf16::from_f32(2.0),
             bf16::from_f32(4.0),
@@ -443,5 +672,36 @@ mod tests {
     #[test]
     fn rejects_empty_statistics_input() {
         assert!(statistics::<f32>(&[]).is_err());
+    }
+
+    #[test]
+    fn creates_and_inspects_owned_tensor() {
+        let tensor = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2], false).unwrap();
+
+        assert_eq!(tensor.shape().unwrap(), vec![2, 2]);
+        assert_eq!(tensor.scalar_type().unwrap(), ScalarType::F32);
+        assert_eq!(tensor.to_vec_f32().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn performs_tensor_algebra() {
+        let left = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0], &[2, 2], false).unwrap();
+        let right = Tensor::ones(&[2, 2], ScalarType::F32, false).unwrap();
+
+        let added = left.add(&right).unwrap();
+        assert_eq!(added.to_vec_f32().unwrap(), vec![2.0, 3.0, 4.0, 5.0]);
+
+        let multiplied = left.matmul(&right).unwrap();
+        assert_eq!(multiplied.to_vec_f32().unwrap(), vec![3.0, 3.0, 7.0, 7.0]);
+    }
+
+    #[test]
+    fn computes_tensor_gradients() {
+        let tensor = Tensor::from_slice(&[1.0_f32, 2.0, 3.0], &[3], true).unwrap();
+        let doubled = tensor.add(&tensor).unwrap();
+        let mut total = doubled.sum().unwrap();
+        total.backward().unwrap();
+
+        assert_eq!(tensor.grad().unwrap().to_vec_f32().unwrap(), vec![2.0; 3]);
     }
 }
