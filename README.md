@@ -1,5 +1,7 @@
 # RTorch
 
+[![RTorch](https://github.com/lutfia95/RTorch/actions/workflows/rtorch.yml/badge.svg?branch=main)](https://github.com/lutfia95/RTorch/actions/workflows/rtorch.yml)
+
 RTorch (`rtorch`) is a Rust-facing data loading and preprocessing crate built on top of LibTorch.
 
 The current goal of this repository is narrow and practical:
