@@ -2,161 +2,114 @@
 
 [![RTorch](https://github.com/lutfia95/RTorch/actions/workflows/rtorch.yml/badge.svg?branch=main)](https://github.com/lutfia95/RTorch/actions/workflows/rtorch.yml)
 
-RTorch (`rtorch`) is a Rust-facing data loading and preprocessing crate built on top of LibTorch.
+RTorch (`rtorch`) is a Rust-facing tensor loading and preprocessing crate backed
+by LibTorch, PyTorch's C++ distribution. It provides a small safe Rust API over a
+C ABI and C++ LibTorch backend.
 
-The current goal of this repository is narrow and practical:
-
-- load tensor samples stored as `.pt` files from class-labeled folders
-- expose dataset metadata to Rust
-- batch and iterate samples from Rust
-- apply common tensor preprocessing through LibTorch before batching
-
-RTorch does not start Python or require the Python `torch` package. It does require
-LibTorch, which is PyTorch's C++ distribution. It is currently a small Rust API
-over a C ABI and C++ LibTorch backend.
+RTorch is useful when you want a PyTorch-like dataset and dataloader workflow in
+Rust without starting Python at runtime.
 
 ## What Is Included
 
-The repository currently includes:
+| RTorch feature | Python/PyTorch equivalent | Status |
+| --- | --- | --- |
+| `TensorDataset::from_class_folders(...)` | custom `torch.utils.data.Dataset` scanning class folders | Included |
+| `.pt` sample loading | `torch.load(path)` | Included |
+| `.h5` / `.hdf5` sample loading | `h5py.File(...)` plus tensor conversion | Included when HDF5 is available |
+| `TensorDataset::len()` | `len(dataset)` | Included |
+| `TensorDataset::get(index)` | `dataset[index]` / `__getitem__` | Included |
+| `TensorDataset::class_names()` | `dataset.classes` / `ImageFolder.classes` | Included |
+| `DataLoader::new(...)` | `torch.utils.data.DataLoader(...)` | Included |
+| `DataLoaderConfig::drop_last` | `drop_last=True` | Included |
+| `DataLoader::len()` | `len(loader)` | Included |
+| `DataLoader` iterator | `for batch in loader:` | Included |
+| `TransformPipeline` | `torchvision.transforms.Compose(...)` style preprocessing | Included |
+| `to_float` | `tensor.float()` | Included |
+| `resize` | `torch.nn.functional.interpolate(...)` | Included |
+| `center_crop` | center crop transform | Included |
+| `normalize` | `(x - mean) / std` | Included |
+| `Batch::data()` | tensor values copied to host data | Included as `&[f32]` |
+| `Batch::tensor()` | batch tensor | Included |
+| `statistics(&[T])` | tensor reductions such as mean/std/min/max | Included |
+| `Tensor` autograd basics | `requires_grad`, `backward`, `grad` | Included |
 
-- a safe Rust crate: `crates/rtorch`
-- a low-level FFI crate: `crates/rtorch-sys`
-- a C++17 LibTorch backend compiled through CMake
-- an owned `Tensor` handle that preserves LibTorch tensor and autograd state
-- basic tensor construction, inspection, addition, matrix multiplication,
-  reshape, sum, backward, and gradient access
-- a dataset scanner for class-folder `.pt` tensor datasets
-- HDF5 dataset loading for `.h5` and `.hdf5` tensor data when RTorch is built
-  with native HDF5 development files available
-- a transform pipeline with these operations:
-  - `to_float`
-  - `resize`
-  - `center_crop`
-  - `normalize`
-- a batch loader with:
-  - configurable `batch_size`
-  - optional shuffling
-  - optional `drop_last`
-  - batch count through `len()`
-  - Rust `Iterator` support
-  - iterative `next_batch()` access
-- dataset metadata APIs:
-  - `len()`
-  - `is_empty()`
-  - `class_names()`
-- direct dataset sample access with `get(index)`
-- LibTorch-computed batch statistics:
-  - element count and sum
-  - mean
-  - population and sample standard deviation
-  - minimum and maximum
-- standalone Torch-backed statistics over common Rust numeric slices
+## Not Included Yet
 
-## What Is Not Included Yet
+| Feature | Current status |
+| --- | --- |
+| JPEG/PNG/WebP image decoding | Not included |
+| Python bindings | Not included |
+| multiprocessing workers / `num_workers` | Not included |
+| prefetch queues | Not included |
+| pinned memory | Not included |
+| custom sampler API | Not included |
+| custom collate function | Not included |
+| augmentation-heavy transforms such as random crop/flip/color jitter | Not included |
+| neural network modules, optimizers, training loops | Not included |
+| TorchScript model APIs | Not included |
 
-The crate does not currently include:
+RTorch is currently a LibTorch-backed tensor dataset loader and small tensor API,
+not a full PyTorch replacement.
 
-- image decoding for JPEG, PNG, WebP, or similar formats
-- Python `Dataset` or Python `DataLoader` bindings
-- multiprocessing or worker threads
-- prefetch queues
-- pinned-memory support
-- random crop, horizontal flip, color jitter, or augmentation-heavy transforms
-- generic custom dataset traits on the Rust side
-- direct zero-copy exposure of LibTorch tensors to Rust
-- neural-network module, optimizer, scheduler, CUDA, distributed-training, or
-  TorchScript model APIs
-
-That means the current project is best understood as a first LibTorch-backed tensor dataset loader for Rust, not a full training input pipeline framework.
-
-## Architecture
-
-The current stack is:
-
-`Rust safe API -> rtorch-sys -> C ABI -> C++ LibTorch shim`
-
-Why it is structured this way:
-
-- Rust gets a small, ergonomic API
-- the `-sys` crate owns the raw FFI boundary
-- the C ABI hides C++ exceptions, templates, and LibTorch internals
-- the C++ layer handles actual tensor loading and preprocessing using LibTorch
-
-This design keeps Rust code simpler and avoids binding the full LibTorch C++ surface directly.
-
-### Why There Is Still A Small Binding
-
-Rust cannot directly call arbitrary LibTorch C++ APIs as if they were Rust
-functions. C++ has no stable, portable ABI for templates, overloaded methods,
-exceptions, and objects such as `torch::Tensor`.
-
-RTorch therefore uses a deliberately small C ABI. Only the operations exposed by
-RTorch need wrapper functions; it does not generate or maintain bindings for all
-of LibTorch. Alternatives such as `cxx`, `autocxx`, or an existing crate still
-create an interop layer, even if some of it is generated.
-
-## Dataset Format
-
-The loader expects a directory tree like this:
+## Repository Layout
 
 ```text
-dataset/
-  class_a/
-    sample1.pt
-    sample2.pt
-  class_b/
-    sample3.pt
-    nested/
-      sample4.pt
+Cargo.toml
+README.md
+scripts/
+  download-libtorch.sh
+  download-hdf5.sh
+examples/
+  python/
+  rust/
+crates/
+  rtorch/
+    src/lib.rs
+    examples/
+      hdf5.rs
+      statistics.rs
+      tensor_folder.rs
+  rtorch-sys/
+    build.rs
+    src/lib.rs
+    ffi/
+      CMakeLists.txt
+      include/rtorch.h
+      src/rtorch.cpp
 ```
 
-Rules:
+The main safe Rust API lives in
+[`crates/rtorch/src/lib.rs`](crates/rtorch/src/lib.rs). The C++ backend lives in
+[`crates/rtorch-sys/ffi/src/rtorch.cpp`](crates/rtorch-sys/ffi/src/rtorch.cpp).
 
-- every top-level directory under `dataset/` is treated as one class
-- class names are taken from the directory names
-- class labels are assigned by sorted directory order
-- `.pt` files are discovered recursively inside each class directory
-- files are processed in sorted path order within each class
+## Installation And Build
 
-Example label mapping:
-
-```text
-dataset/
-  cats/
-  dogs/
-```
-
-Produces:
-
-- `cats -> 0`
-- `dogs -> 1`
-
-Each `.pt` file should contain a single tensor. The expected common shape is `C x H x W`.
-
-## Build Requirements
+### Requirements
 
 You need:
 
 - Rust toolchain with Cargo
 - CMake
-- a C++17 compiler such as Clang
-- a local LibTorch installation
-- optional HDF5 development files for `.h5` and `.hdf5` loading
+- a C++17 compiler
+- LibTorch
+- optional HDF5 development/runtime libraries for `.h5` and `.hdf5`
 
-RTorch expects PyTorch's LibTorch C++ distribution. The helper script downloads
-the Linux CPU C++ package into `third_party/libtorch` by default:
+### Install LibTorch
 
-```bash
-scripts/download-libtorch.sh
-```
-
-For a CUDA build, choose the matching PyTorch LibTorch variant:
+The helper script downloads the Linux CPU LibTorch C++ package into
+`third_party/libtorch`:
 
 ```bash
-LIBTORCH_VARIANT=cu128 scripts/download-libtorch.sh
+bash scripts/download-libtorch.sh
 ```
 
-Then set the LibTorch path before building:
+For CUDA builds, choose the matching PyTorch LibTorch variant:
+
+```bash
+LIBTORCH_VARIANT=cu128 bash scripts/download-libtorch.sh
+```
+
+Use it with:
 
 ```bash
 export LIBTORCH="$PWD/third_party/libtorch"
@@ -164,50 +117,83 @@ export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 ```
 
-`LIBTORCH` must point to the LibTorch root directory containing `include/` and `lib/`.
+`LIBTORCH` must point to the LibTorch root directory containing `include/` and
+`lib/`.
 
-HDF5 support is enabled automatically when CMake can find HDF5. If HDF5 is
-installed outside the system search path, pass its root while building.
+### Install HDF5
 
-The helper script installs HDF5 and its `libaec` runtime dependency into
-`third_party/hdf5` using conda, mamba, or micromamba:
+HDF5 support is enabled automatically when CMake can find HDF5. The helper
+script installs HDF5 and `libaec` into `third_party/hdf5` using conda, mamba, or
+micromamba:
 
 ```bash
-scripts/download-hdf5.sh
+bash scripts/download-hdf5.sh
 ```
 
-Then build or run with both native library paths available:
+Then source the generated environment file:
+
+```bash
+source third_party/hdf5/rtorch-env.sh
+```
+
+That sets:
+
+```bash
+export HDF5_ROOT="$PWD/third_party/hdf5"
+export LIBTORCH="$PWD/third_party/libtorch"
+export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+```
+
+If you see:
+
+```text
+libhdf5.so.310: cannot open shared object file
+```
+
+then the binary was built with HDF5, but the dynamic loader cannot find the HDF5
+shared libraries at runtime. Run:
+
+```bash
+source third_party/hdf5/rtorch-env.sh
+```
+
+or manually add `third_party/hdf5/lib` to `LD_LIBRARY_PATH`.
+
+On Ubuntu you can also install HDF5 from the system package manager:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libhdf5-dev
+```
+
+### Build And Test
+
+With LibTorch only:
+
+```bash
+export LIBTORCH="$PWD/third_party/libtorch"
+export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
+cargo build
+cargo test
+```
+
+With LibTorch and local HDF5:
 
 ```bash
 source third_party/hdf5/rtorch-env.sh
 cargo build
+cargo test
 ```
 
-Or set the variables manually:
+Run examples:
 
 ```bash
-export HDF5_ROOT="$PWD/third_party/hdf5"
-export LD_LIBRARY_PATH="$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
-cargo build
-```
-
-With the local LibTorch helper too:
-
-```bash
-export LIBTORCH="$PWD/third_party/libtorch"
-export HDF5_ROOT="$PWD/third_party/hdf5"
-export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+cargo run -p rtorch --example statistics
 cargo run -p rtorch --example hdf5 -- test_data/train.h5 positions
+cargo run -p rtorch --example tensor_folder
 ```
 
-If you see an error such as `libhdf5.so.310: cannot open shared object file`,
-the binary was built with HDF5 but the dynamic loader cannot find the HDF5
-shared library at runtime. Set `HDF5_ROOT` and `LD_LIBRARY_PATH` as shown above,
-or run `source third_party/hdf5/rtorch-env.sh`. Activating the conda prefix alone
-does not set `HDF5_ROOT` for this build. You can also install HDF5 through your
-system package manager, for example `sudo apt install libhdf5-dev`.
-
-## Add RTorch To A Rust Project
+## Add RTorch To Another Rust Project
 
 Until RTorch is published on crates.io, add it as a path dependency:
 
@@ -220,164 +206,186 @@ Then build or run with LibTorch available:
 
 ```bash
 export LIBTORCH=/path/to/libtorch
+export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo run
 ```
 
-On Linux, the LibTorch shared-library directory may also need to be added to
-`LD_LIBRARY_PATH`:
+If you use HDF5:
 
 ```bash
-export LD_LIBRARY_PATH="$LIBTORCH/lib:$LD_LIBRARY_PATH"
+export HDF5_ROOT=/path/to/hdf5
+export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+cargo run
 ```
 
-On macOS, use `DYLD_LIBRARY_PATH` when the LibTorch package does not provide an
-install-time runtime path:
+## Dataset Formats
 
-```bash
-export DYLD_LIBRARY_PATH="$LIBTORCH/lib:$DYLD_LIBRARY_PATH"
-```
+### Class Folder `.pt` Layout
 
-## Usage Examples
-
-### Compute Statistics From Rust Values
-
-This calls LibTorch reductions without creating a dataset:
-
-```rust
-use rtorch::statistics;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let values = [1.0_f32, 2.0, 3.0, 4.0];
-    let stats = statistics(&values)?;
-
-    println!("count: {}", stats.count);
-    println!("sum: {}", stats.sum);
-    println!("mean: {}", stats.mean);
-    println!("population std: {}", stats.population_std);
-    println!("sample std: {}", stats.sample_std);
-    println!("min: {}", stats.min);
-    println!("max: {}", stats.max);
-
-    Ok(())
-}
-```
-
-The same function accepts different scalar types:
-
-```rust
-use rtorch::statistics;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let float32 = statistics(&[1.0_f32, 2.0, 3.0])?;
-    let float64 = statistics(&[1.0_f64, 2.0, 3.0])?;
-    let signed = statistics(&[-10_i64, 0, 10])?;
-    let unsigned = statistics(&[10_u16, 20, 30])?;
-    let booleans = statistics(&[true, false, true])?;
-
-    println!("f32 mean: {}", float32.mean);
-    println!("f64 mean: {}", float64.mean);
-    println!("i64 range: {}..={}", signed.min, signed.max);
-    println!("u16 sum: {}", unsigned.sum);
-    println!("true fraction: {}", booleans.mean);
-
-    Ok(())
-}
-```
-
-### Use `f16` And `bf16`
-
-Rust does not provide built-in `f16` or `bf16` primitive types. RTorch re-exports
-both types from the `half` crate:
-
-```rust
-use rtorch::{bf16, f16, statistics};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let float16_values = [
-        f16::from_f32(1.0),
-        f16::from_f32(2.0),
-        f16::from_f32(3.0),
-    ];
-    let bfloat16_values = [
-        bf16::from_f32(2.0),
-        bf16::from_f32(4.0),
-        bf16::from_f32(6.0),
-    ];
-
-    println!("f16: {:?}", statistics(&float16_values)?);
-    println!("bf16: {:?}", statistics(&bfloat16_values)?);
-
-    Ok(())
-}
-```
-
-### Supported Statistics Types
-
-| Rust type | LibTorch dtype |
-| --- | --- |
-| `f16` | `torch.float16` |
-| `bf16` | `torch.bfloat16` |
-| `f32` | `torch.float32` |
-| `f64` | `torch.float64` |
-| `i8`, `i16`, `i32`, `i64` | Matching signed integer dtype |
-| `u8`, `u16`, `u32`, `u64` | Matching unsigned integer dtype |
-| `isize`, `usize` | Matching 32-bit or 64-bit integer dtype |
-| `bool` | `torch.bool` |
-
-All fields in the returned `Statistics` value are `f64`, regardless of input
-type. Integer values larger than the exact range of `f64` may therefore lose
-precision in `sum`, `mean`, `min`, or `max`.
-
-Run the repository's multi-type example with:
-
-```bash
-cargo run -p rtorch --example statistics
-```
-
-These types currently apply to the standalone `statistics(&[T])` API. The
-dataset loader converts returned batch storage to `f32`, so `Batch::data()`
-remains `&[f32]` and `Batch::statistics()` describes those returned `f32`
-values.
-
-### Inspect A Dataset
-
-The dataset root must contain one directory per class:
-
-```rust
-use rtorch::TensorDataset;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dataset = TensorDataset::from_class_folders("dataset")?;
-
-    println!("samples: {}", dataset.len());
-    println!("classes: {:?}", dataset.class_names()?);
-
-    Ok(())
-}
-```
-
-For this directory:
+RTorch can scan a class-folder dataset:
 
 ```text
 dataset/
   cats/
     cat_001.pt
+    cat_002.pt
   dogs/
     dog_001.pt
+    nested/
+      dog_002.pt
 ```
 
-`class_names()` returns `["cats", "dogs"]`, and their labels are `0` and `1`.
+Rules:
 
-Class-folder datasets may contain `.pt`, `.h5`, or `.hdf5` files. For HDF5 files
-RTorch looks for a numeric dataset named `tensor`, `data`, or `positions`.
+- every top-level directory is one class
+- class names come from directory names
+- labels are assigned by sorted class directory order
+- `.pt`, `.h5`, and `.hdf5` files are discovered recursively
+- `.pt` files should contain a single tensor
+- image-like transforms expect `C x H x W`
 
-### Load An HDF5 File
+Example labels:
 
-An HDF5 file can also be loaded directly by selecting the numeric dataset to
-read:
+| Folder | Label |
+| --- | --- |
+| `cats` | `0` |
+| `dogs` | `1` |
+
+### HDF5 Layout
+
+RTorch can load an HDF5 file directly:
 
 ```rust
-use rtorch::{DataLoader, TensorDataset};
+let dataset = TensorDataset::from_hdf5_file("test_data/train.h5", "positions")?;
+```
+
+For HDF5 files in class folders, RTorch looks for a numeric dataset named:
+
+1. `tensor`
+2. `data`
+3. `positions`
+
+For atomistic-style HDF5 files, if a `structures` dataset exists with `offset`
+and `length` fields, RTorch exposes each structure as one sample by slicing the
+selected numeric dataset along the first dimension.
+
+For example, a file with:
+
+```text
+positions:       [858, 3]
+forces:          [858, 3]
+atomic_numbers:  [858]
+structures:      fields offset, length, cell, pbc, energy, ...
+```
+
+can be read as:
+
+```rust
+let positions = TensorDataset::from_hdf5_file("test_data/train.h5", "positions")?;
+```
+
+Each sample is then a variable-length slice such as `[16, 3]`, `[24, 3]`, etc.
+Use `batch_size = 1` unless all samples in a batch have matching shapes.
+
+## Python To Rust Examples
+
+More side-by-side examples are in [`examples/`](examples/).
+
+### Class Folder `.pt`
+
+Python:
+
+```python
+from pathlib import Path
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+class TensorFolderDataset(Dataset):
+    def __init__(self, root):
+        self.classes = sorted(p.name for p in Path(root).iterdir() if p.is_dir())
+        self.samples = []
+        for label, class_name in enumerate(self.classes):
+            for path in sorted((Path(root) / class_name).rglob("*.pt")):
+                self.samples.append((path, label))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        path, label = self.samples[index]
+        return torch.load(path), label
+
+dataset = TensorFolderDataset("dataset")
+loader = DataLoader(dataset, batch_size=8, shuffle=True, drop_last=True)
+
+for data, labels in loader:
+    print(data.shape, labels)
+```
+
+Rust:
+
+```rust
+use rtorch::{DataLoader, DataLoaderConfig, TensorDataset};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dataset = TensorDataset::from_class_folders("dataset")?;
+    println!("classes: {:?}", dataset.class_names()?);
+
+    let mut loader = DataLoader::with_config(
+        &dataset,
+        None,
+        DataLoaderConfig {
+            batch_size: 8,
+            shuffle: true,
+            drop_last: true,
+        },
+    )?;
+
+    for batch in &mut loader {
+        let batch = batch?;
+        println!("{:?} {:?}", batch.shape(), batch.labels());
+    }
+
+    Ok(())
+}
+```
+
+### Direct HDF5 File
+
+Python:
+
+```python
+import h5py
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+class H5Structures(Dataset):
+    def __init__(self, path, key):
+        self.path = path
+        self.key = key
+        with h5py.File(path, "r") as f:
+            self.spans = [(int(s["offset"]), int(s["length"])) for s in f["structures"]]
+
+    def __len__(self):
+        return len(self.spans)
+
+    def __getitem__(self, index):
+        offset, length = self.spans[index]
+        with h5py.File(self.path, "r") as f:
+            values = f[self.key][offset:offset + length]
+        return torch.as_tensor(values, dtype=torch.float32), 0
+
+dataset = H5Structures("test_data/train.h5", "positions")
+loader = DataLoader(dataset, batch_size=1, shuffle=False)
+
+for positions, labels in loader:
+    print(positions.shape, labels)
+```
+
+Rust:
+
+```rust
+use rtorch::{DataLoader, DataLoaderConfig, TensorDataset};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dataset = TensorDataset::from_hdf5_file("test_data/train.h5", "positions")?;
@@ -386,538 +394,190 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("sample shape: {:?}", sample.shape());
     println!("sample label: {}", sample.label());
 
-    let mut loader = DataLoader::new(&dataset, None, 1, false)?;
+    let mut loader = DataLoader::with_config(
+        &dataset,
+        None,
+        DataLoaderConfig {
+            batch_size: 1,
+            shuffle: false,
+            drop_last: false,
+        },
+    )?;
 
     for batch in &mut loader {
         let batch = batch?;
-        println!("shape: {:?}", batch.shape());
-        println!("values: {}", batch.data().len());
+        println!("{:?} {:?}", batch.shape(), batch.labels());
     }
 
     Ok(())
 }
 ```
 
-If the HDF5 file contains a `structures` dataset with `offset` and `length`
-fields, each structure is exposed as one sample by slicing the selected numeric
-dataset along its first dimension. Otherwise, the selected dataset is returned
-as one sample. Batching still requires compatible sample shapes, so variable
-length HDF5 structures should be loaded with `batch_size = 1` unless the samples
-have matching shapes.
+## API Reference
 
-Run the HDF5 example with:
+### Dataset API
 
-```bash
-cargo run -p rtorch --example hdf5 -- test_data/train.h5 positions
-```
+| Rust | Python/PyTorch equivalent | Meaning |
+| --- | --- | --- |
+| `TensorDataset::from_class_folders(root)` | custom folder `Dataset(root)` | Scan class folders and index tensor files |
+| `TensorDataset::from_hdf5_file(path, key)` | custom `h5py` dataset | Index one HDF5 file by dataset key |
+| `dataset.len()` | `len(dataset)` | Number of samples |
+| `dataset.is_empty()` | `len(dataset) == 0` | Empty check |
+| `dataset.class_names()` | `dataset.classes` | Class names in label order |
+| `dataset.get(index)` | `dataset[index]` | Load one sample |
+| `dataset.get_with_transform(index, transform)` | `transform(dataset[index])` | Load one transformed sample |
 
-### Load Batches Without Transforms
+### Sample And Batch API
 
-```rust
-use rtorch::{DataLoader, TensorDataset};
+| Rust | Python/PyTorch equivalent | Meaning |
+| --- | --- | --- |
+| `sample.data()` | `sample_tensor.flatten()` / NumPy view | Flat `&[f32]` sample data |
+| `sample.shape()` | `sample_tensor.shape` | Sample tensor shape |
+| `sample.label()` | label from `dataset[index]` | Sample label |
+| `sample.tensor()` | sample tensor | Owned LibTorch-backed tensor |
+| `batch.data()` | `batch_tensor.flatten()` | Flat `&[f32]` batch data |
+| `batch.shape()` | `batch_tensor.shape` | Batch tensor shape |
+| `batch.labels()` | batch labels tensor/list | Labels for each sample |
+| `batch.tensor()` | batch tensor | Owned LibTorch-backed tensor |
+| `batch.statistics()` | `batch.mean()`, `batch.std()`, etc. | Aggregate statistics |
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dataset = TensorDataset::from_class_folders("dataset")?;
-    let mut loader = DataLoader::new(&dataset, None, 16, false)?;
+### DataLoader API
 
-    while let Some(batch) = loader.next_batch()? {
-        println!("shape: {:?}", batch.shape());
-        println!("labels: {:?}", batch.labels());
-        println!("elements: {}", batch.data().len());
-    }
+| Rust | Python/PyTorch equivalent | Meaning |
+| --- | --- | --- |
+| `DataLoader::new(dataset, transforms, batch_size, shuffle)` | `DataLoader(dataset, batch_size, shuffle)` | Basic loader |
+| `DataLoader::with_config(...)` | `DataLoader(..., drop_last=...)` | Loader with config |
+| `DataLoaderConfig::batch_size` | `batch_size` | Samples per batch |
+| `DataLoaderConfig::shuffle` | `shuffle` | Shuffle order on reset/start |
+| `DataLoaderConfig::drop_last` | `drop_last` | Drop incomplete final batch |
+| `loader.len()` | `len(loader)` | Number of batches |
+| `loader.reset()` | new epoch / recreate iterator | Reset cursor and reshuffle if enabled |
+| `loader.next_batch()` | `next(iter(loader))` | Pull one batch |
+| `for batch in &mut loader` | `for batch in loader` | Iterate batches |
 
-    Ok(())
-}
-```
+### Transform API
 
-All tensors in a batch must have compatible shapes because LibTorch stacks them
-into one batch tensor.
+| Rust | Python/PyTorch equivalent | Meaning |
+| --- | --- | --- |
+| `TransformConfig::to_float` | `x.float()` | Convert tensor to float32 |
+| `TransformConfig::resize` | `F.interpolate(...)` | Resize `C x H x W` tensor |
+| `TransformConfig::center_crop` | center crop transform | Crop spatial center |
+| `TransformConfig::normalize_mean/std` | `(x - mean) / std` | Channel-wise normalization |
+| `TransformPipeline::new(config)` | `Compose([...])` | Create transform pipeline |
 
-### Load, Transform, And Analyze Batches
+## Supported Scalar Types
 
-```rust
-use rtorch::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
+These types are supported by `statistics(&[T])` and tensor construction where
+applicable.
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dataset = TensorDataset::from_class_folders("dataset")?;
+| Rust type | LibTorch dtype |
+| --- | --- |
+| `f16` | `torch.float16` |
+| `bf16` | `torch.bfloat16` |
+| `f32` | `torch.float32` |
+| `f64` | `torch.float64` |
+| `i8` | `torch.int8` |
+| `i16` | `torch.int16` |
+| `i32` | `torch.int32` |
+| `i64` | `torch.int64` |
+| `u8` | `torch.uint8` |
+| `u16` | `torch.uint16` when supported by the detected LibTorch |
+| `u32` | `torch.uint32` when supported by the detected LibTorch |
+| `u64` | `torch.uint64` when supported by the detected LibTorch |
+| `isize` | platform-width signed integer dtype |
+| `usize` | platform-width unsigned integer dtype when supported |
+| `bool` | `torch.bool` |
 
-    let transforms = TransformPipeline::new(&TransformConfig {
-        to_float: true,
-        resize: Some((256, 256)),
-        center_crop: Some((224, 224)),
-        normalize_mean: Some(vec![0.485, 0.456, 0.406]),
-        normalize_std: Some(vec![0.229, 0.224, 0.225]),
-    })?;
-
-    let mut loader = DataLoader::new(&dataset, Some(&transforms), 8, true)?;
-
-    while let Some(batch) = loader.next_batch()? {
-        let stats = batch.statistics()?;
-
-        println!("shape: {:?}", batch.shape());
-        println!("labels: {:?}", batch.labels());
-        println!("mean: {:.6}", stats.mean);
-        println!("population std: {:.6}", stats.population_std);
-        println!("range: [{:.6}, {:.6}]", stats.min, stats.max);
-    }
-
-    Ok(())
-}
-```
-
-Batch statistics cover every tensor element in the batch, not the labels.
-
-### Iterate For Multiple Epochs
-
-```rust
-use rtorch::{DataLoader, TensorDataset};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dataset = TensorDataset::from_class_folders("dataset")?;
-    let mut loader = DataLoader::new(&dataset, None, 32, true)?;
-
-    for epoch in 0..3 {
-        loader.reset()?;
-
-        while let Some(batch) = loader.next_batch()? {
-            println!("epoch={epoch} shape={:?}", batch.shape());
-        }
-    }
-
-    Ok(())
-}
-```
-
-When shuffling is enabled, `reset()` creates a new shuffled sample order.
-
-### Read Values From A Batch
-
-`Batch::data()` is a flat `f32` slice in row-major tensor order:
-
-```rust
-while let Some(batch) = loader.next_batch()? {
-    let shape = batch.shape();
-    let values = batch.data();
-
-    println!("shape: {shape:?}");
-    println!("first value: {:?}", values.first());
-}
-```
-
-For shape `[8, 3, 224, 224]`, the flat slice contains
-`8 * 3 * 224 * 224` values.
-
-## API Overview
-
-The main Rust types are:
-
-- `Tensor`
-- `ScalarType`
-- `TensorDataset`
-- `Sample`
-- `TransformConfig`
-- `TransformPipeline`
-- `DataLoaderConfig`
-- `DataLoader`
-- `Batch`
-- `Statistics`
-- `StatisticsElement`
-- `statistics(&[T])`
-
-Typical flow:
-
-1. Create a dataset from a root folder.
-2. Optionally create a transform pipeline.
-3. Create a loader from the dataset and optional transforms.
-4. Pull batches in a loop with `next_batch()` or by iterating the loader.
-
-Statistics can also be computed without a dataset:
-
-```rust
-let stats = rtorch::statistics(&[1.0, 2.0, 3.0, 4.0])?;
-println!("mean={} std={}", stats.mean, stats.population_std);
-```
-
-### Owned Tensors And Autograd
-
-`Tensor` keeps its underlying LibTorch tensor alive behind the Rust API:
-
-```rust
-use rtorch::Tensor;
-
-let input = Tensor::from_slice(&[1.0_f32, 2.0, 3.0], &[3], true)?;
-let doubled = input.add(&input)?;
-let mut total = doubled.sum()?;
-total.backward()?;
-
-assert_eq!(input.grad()?.to_vec_f32()?, vec![2.0, 2.0, 2.0]);
-# Ok::<(), rtorch::Error>(())
-```
-
-This is the foundation for broader model and training support. It is not yet a
-complete replacement for Python PyTorch.
-
-## Full Example
-
-```rust
-use rtorch::{DataLoader, TensorDataset, TransformConfig, TransformPipeline};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dataset = TensorDataset::from_class_folders("dataset")?;
-
-    println!("sample count: {}", dataset.len());
-    println!("is empty: {}", dataset.is_empty());
-    println!("classes: {:?}", dataset.class_names()?);
-
-    let transforms = TransformPipeline::new(&TransformConfig {
-        to_float: true,
-        resize: Some((256, 256)),
-        center_crop: Some((224, 224)),
-        normalize_mean: Some(vec![0.485, 0.456, 0.406]),
-        normalize_std: Some(vec![0.229, 0.224, 0.225]),
-    })?;
-
-    let mut loader = DataLoader::new(&dataset, Some(&transforms), 8, true)?;
-
-    while let Some(batch) = loader.next_batch()? {
-        println!("batch shape: {:?}", batch.shape());
-        println!("batch labels: {:?}", batch.labels());
-        println!("flat element count: {}", batch.data().len());
-        println!("batch statistics: {:?}", batch.statistics()?);
-    }
-
-    Ok(())
-}
-```
-
-## How To Use The Dataset API
-
-Create a dataset:
-
-```rust
-let dataset = TensorDataset::from_class_folders("dataset")?;
-```
-
-What this does:
-
-- validates that the root exists
-- validates that the root is a directory
-- scans class subdirectories
-- recursively finds `.pt` files
-- records class names and integer labels
-
-Useful methods:
-
-```rust
-let count = dataset.len();
-let empty = dataset.is_empty();
-let classes = dataset.class_names()?;
-let sample = dataset.get(0)?;
-```
-
-What each method means:
-
-- `len()` returns the total number of discovered `.pt` samples across all classes
-- `is_empty()` is a convenience check based on `len()`
-- `class_names()` returns class names in the same sorted order used for label assignment
-- `get(index)` loads one sample and returns its data, shape, label, statistics,
-  and owned tensor
-
-## How To Use The Transform Pipeline
-
-The transform pipeline is configured through `TransformConfig` and created with `TransformPipeline::new(...)`.
+All fields in `Statistics` are returned as `f64`.
 
 Example:
 
 ```rust
-let transforms = TransformPipeline::new(&TransformConfig {
-    to_float: true,
-    resize: Some((256, 256)),
-    center_crop: Some((224, 224)),
-    normalize_mean: Some(vec![0.485, 0.456, 0.406]),
-    normalize_std: Some(vec![0.229, 0.224, 0.225]),
-})?;
-```
+use rtorch::statistics;
 
-### `to_float`
-
-```rust
-to_float: true
-```
-
-Behavior:
-
-- converts input tensors to `float32` if they are not already `float32`
-
-Use it when:
-
-- your stored `.pt` tensors are integer or another numeric type
-- you want to normalize or resize consistently in float space
-
-### `resize`
-
-```rust
-resize: Some((256, 256))
-```
-
-Behavior:
-
-- resizes a `C x H x W` tensor to the target height and width
-- uses LibTorch interpolation internally
-
-Important:
-
-- the tensor must be 3D
-- resize happens before center crop if both are enabled
-
-### `center_crop`
-
-```rust
-center_crop: Some((224, 224))
-```
-
-Behavior:
-
-- crops the spatial center of a `C x H x W` tensor
-
-Important:
-
-- the tensor must be 3D
-- crop dimensions must not exceed the current tensor height and width
-
-### `normalize_mean` and `normalize_std`
-
-```rust
-normalize_mean: Some(vec![0.485, 0.456, 0.406]),
-normalize_std: Some(vec![0.229, 0.224, 0.225]),
-```
-
-Behavior:
-
-- performs channel-wise normalization
-- the mean and std vectors must have the same length
-- their length must match the channel count `C`
-
-The operation is effectively:
-
-```text
-output = (input - mean) / std
-```
-
-per channel.
-
-### Transform Order
-
-The current backend applies transforms in this order:
-
-1. `to_float`
-2. `resize`
-3. `center_crop`
-4. `normalize`
-
-That order matters. For example, normalization happens after resizing and cropping.
-
-## How To Use The DataLoader
-
-Create a loader like this:
-
-```rust
-let mut loader = DataLoader::new(&dataset, Some(&transforms), 8, true)?;
-```
-
-Arguments:
-
-- `&dataset`: the dataset to read from
-- `Some(&transforms)`: optional preprocessing pipeline
-- `8`: batch size
-- `true`: whether to shuffle sample order on reset/start
-
-If you do not want transforms:
-
-```rust
-let mut loader = DataLoader::new(&dataset, None, 8, false)?;
-```
-
-For Python-style `drop_last` behavior, use `DataLoaderConfig`:
-
-```rust
-let mut loader = DataLoader::with_config(
-    &dataset,
-    None,
-    DataLoaderConfig {
-        batch_size: 8,
-        shuffle: true,
-        drop_last: true,
-    },
-)?;
-```
-
-Useful methods:
-
-```rust
-let batches = loader.len();
-let empty = loader.is_empty();
-```
-
-### Iterating Batches
-
-Call `next_batch()` until it returns `Ok(None)`:
-
-```rust
-while let Some(batch) = loader.next_batch()? {
-    println!("{:?}", batch.shape());
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stats = statistics(&[1.0_f32, 2.0, 3.0, 4.0])?;
+    println!("mean={} std={}", stats.mean, stats.population_std);
+    Ok(())
 }
 ```
 
-`DataLoader` also implements `Iterator<Item = Result<Batch, Error>>`:
+## Tensor API
+
+`Tensor` is an owned LibTorch tensor handle. It supports:
+
+| Rust | Python/PyTorch equivalent |
+| --- | --- |
+| `Tensor::from_slice(values, shape, requires_grad)` | `torch.tensor(..., requires_grad=...)` |
+| `Tensor::zeros(shape, dtype, requires_grad)` | `torch.zeros(...)` |
+| `Tensor::ones(shape, dtype, requires_grad)` | `torch.ones(...)` |
+| `tensor.shape()` | `tensor.shape` |
+| `tensor.scalar_type()` | `tensor.dtype` |
+| `tensor.requires_grad()` | `tensor.requires_grad` |
+| `tensor.set_requires_grad(...)` | `tensor.requires_grad_(...)` |
+| `tensor.add(&other)` | `tensor + other` |
+| `tensor.matmul(&other)` | `tensor.matmul(other)` |
+| `tensor.reshape(shape)` | `tensor.reshape(...)` |
+| `tensor.sum()` | `tensor.sum()` |
+| `tensor.backward()` | `tensor.backward()` |
+| `tensor.grad()` | `tensor.grad` |
+| `tensor.to_vec_f32()` | `tensor.cpu().float().flatten().tolist()` |
+
+Autograd example:
 
 ```rust
-for batch in &mut loader {
-    let batch = batch?;
-    println!("{:?}", batch.shape());
+use rtorch::Tensor;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let input = Tensor::from_slice(&[1.0_f32, 2.0, 3.0], &[3], true)?;
+    let doubled = input.add(&input)?;
+    let mut total = doubled.sum()?;
+    total.backward()?;
+
+    assert_eq!(input.grad()?.to_vec_f32()?, vec![2.0, 2.0, 2.0]);
+    Ok(())
 }
 ```
 
-Return meaning:
+## Architecture
 
-- `Ok(Some(batch))`: a batch was produced
-- `Ok(None)`: end of dataset
-- `Err(...)`: loading, preprocessing, or backend failure
-
-### Resetting The Loader
-
-To iterate again:
-
-```rust
-loader.reset()?;
-```
-
-If `shuffle` was enabled, reset reshuffles the sample order.
-
-## How To Use `Batch`
-
-Each `Batch` exposes data, shape, labels, and aggregate statistics:
-
-```rust
-let shape = batch.shape();
-let labels = batch.labels();
-let data = batch.data();
-let statistics = batch.statistics()?;
-```
-
-What they mean:
-
-- `shape()` returns the batch tensor shape as a Rust slice of `usize`
-- `labels()` returns the class label for each sample in the batch
-- `data()` returns the flattened tensor data as `&[f32]`
-- `statistics()` returns statistics computed by LibTorch across all elements in
-  the returned batch
-
-The `Statistics` value contains `count`, `sum`, `mean`, `population_std`,
-`sample_std`, `min`, and `max`.
-
-For a batch of image-like tensors, a shape might look like:
+The stack is:
 
 ```text
-[8, 3, 224, 224]
+safe Rust API -> rtorch-sys -> C ABI -> C++ LibTorch backend
 ```
 
-Meaning:
-
-- batch size `8`
-- channels `3`
-- height `224`
-- width `224`
-
-`data()` is flat memory, so the caller is responsible for interpreting it according to `shape()`.
+Rust cannot directly call arbitrary LibTorch C++ APIs as if they were Rust
+functions. C++ has no stable portable ABI for templates, overloaded methods,
+exceptions, and objects such as `torch::Tensor`. RTorch therefore exposes a
+small C ABI and wraps it in safe Rust types.
 
 ## Error Behavior
 
-Operations return Rust `Result` values.
+Most operations return `Result<T, rtorch::Error>`.
 
-Typical failure cases include:
+Common failure cases:
 
+- `LIBTORCH` is not set
+- runtime linker cannot find LibTorch or HDF5 shared libraries
 - dataset path does not exist
-- dataset path is not a directory
-- no `.pt` files were found
-- tensor shape is incompatible with resize, crop, or normalize
-- normalize mean/std lengths do not match
-- normalize channel count does not match the tensor channel count
-- LibTorch fails to load a `.pt` file
-- batch size is zero
+- dataset root is not a directory
+- no `.pt`, `.h5`, or `.hdf5` files were found
+- HDF5 support was not enabled at build time
+- requested HDF5 dataset key does not exist
+- tensor shapes in a batch are incompatible
+- transform shape requirements are not met
+- `batch_size` is zero
 
-## Current Performance Characteristics
+## Performance Notes
 
-The current implementation is simple and correct-first.
-
-Important current behavior:
+The current implementation is simple and correctness-first:
 
 - samples are loaded on demand
 - loading is synchronous
-- there are no worker threads
-- there is no prefetch queue
-- data is copied from the stacked LibTorch tensor into owned batch storage before Rust reads it
+- batches are stacked with LibTorch
+- batch data is copied to owned `Vec<f32>` storage for Rust slice access
+- no worker threads or prefetch queues are used yet
 
-So this is appropriate for early experiments and API development, but not yet optimized for high-throughput training workloads.
-
-## Repository Layout
-
-```text
-Cargo.toml
-README.md
-crates/
-  rtorch/
-    src/lib.rs
-    examples/statistics.rs
-    examples/tensor_folder.rs
-  rtorch-sys/
-    src/lib.rs
-    build.rs
-    ffi/
-      include/rtorch.h
-      src/rtorch.cpp
-      CMakeLists.txt
-```
-
-Meaning:
-
-- `rtorch`: safe Rust API
-- `rtorch-sys`: raw FFI declarations and build integration
-- `ffi/include`: C ABI header
-- `ffi/src`: C++ LibTorch implementation
-
-## Example Run Flow
-
-A typical run looks like this:
-
-1. You point `TensorDataset` at a dataset root.
-2. The backend scans class directories and indexes `.pt` files.
-3. You build an optional transform pipeline.
-4. You create a `DataLoader`.
-5. Each `next_batch()` call:
-   loads sample tensors from disk,
-   applies transforms,
-   stacks the tensors,
-   computes aggregate statistics with LibTorch,
-   returns batch data, labels, and statistics to Rust.
-
-## Limitations
-
-Be aware of these limitations before building on top of this crate:
-
-- input format is restricted to `.pt` tensor files
-- tensors are expected to work with image-like `C x H x W` transforms
-- no generic augmentation framework exists yet
-- no Rust-native tensor abstraction is exposed
-- no training-loop integration helpers are included
-
-## Future Direction
-
-The next logical improvements are:
-
-- broader dataset support
-- richer metadata and sample inspection APIs
-- worker threads and prefetching
-- more transforms
-- cleaner tensor ownership across the FFI boundary
-- a clearer split between LibTorch-backed mode and any future native Rust mode
+For variable-length HDF5 structures, use `batch_size = 1` or group samples with
+matching shapes before batching.
