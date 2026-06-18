@@ -134,10 +134,24 @@ You need:
 - a C++17 compiler such as Clang
 - a local LibTorch installation
 
-Set the LibTorch path before building:
+RTorch expects PyTorch's LibTorch C++ distribution. The helper script downloads
+the Linux CPU C++ package into `third_party/libtorch` by default:
 
 ```bash
-export LIBTORCH=/path/to/libtorch
+scripts/download-libtorch.sh
+```
+
+For a CUDA build, choose the matching PyTorch LibTorch variant:
+
+```bash
+LIBTORCH_VARIANT=cu128 scripts/download-libtorch.sh
+```
+
+Then set the LibTorch path before building:
+
+```bash
+export LIBTORCH="$PWD/third_party/libtorch"
+export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 ```
 
