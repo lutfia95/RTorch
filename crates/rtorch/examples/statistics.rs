@@ -1,11 +1,7 @@
 use rtorch::{bf16, f16, statistics};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let float16 = [
-        f16::from_f32(1.0),
-        f16::from_f32(2.0),
-        f16::from_f32(3.0),
-    ];
+    let float16 = [f16::from_f32(1.0), f16::from_f32(2.0), f16::from_f32(3.0)];
     let bfloat16 = [
         bf16::from_f32(2.0),
         bf16::from_f32(4.0),

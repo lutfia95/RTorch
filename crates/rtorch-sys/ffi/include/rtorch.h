@@ -109,17 +109,31 @@ RtTransformPipeline* rt_transform_pipeline_new(
 void rt_transform_pipeline_free(RtTransformPipeline* pipeline);
 
 RtTensorDataset* rt_tensor_dataset_new(const char* root);
+RtTensorDataset* rt_tensor_dataset_hdf5_file_new(
+    const char* path,
+    const char* dataset_name);
 void rt_tensor_dataset_free(RtTensorDataset* dataset);
 size_t rt_tensor_dataset_len(const RtTensorDataset* dataset);
 size_t rt_tensor_dataset_class_count(const RtTensorDataset* dataset);
 const char* rt_tensor_dataset_class_name(const RtTensorDataset* dataset, size_t class_index);
+RtOwnedBatch* rt_tensor_dataset_get(
+    const RtTensorDataset* dataset,
+    size_t index,
+    RtTransformPipeline* pipeline);
 
 RtDataLoader* rt_data_loader_new(
     RtTensorDataset* dataset,
     RtTransformPipeline* pipeline,
     size_t batch_size,
     bool shuffle);
+RtDataLoader* rt_data_loader_new_with_options(
+    RtTensorDataset* dataset,
+    RtTransformPipeline* pipeline,
+    size_t batch_size,
+    bool shuffle,
+    bool drop_last);
 void rt_data_loader_free(RtDataLoader* loader);
+size_t rt_data_loader_len(const RtDataLoader* loader);
 bool rt_data_loader_reset(RtDataLoader* loader);
 int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out);
 

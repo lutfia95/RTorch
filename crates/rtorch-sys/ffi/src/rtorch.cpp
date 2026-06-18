@@ -2,6 +2,10 @@
 
 #include <torch/torch.h>
 
+#ifdef RTORCH_WITH_HDF5
+#include <hdf5.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -19,9 +23,19 @@ namespace fs = std::filesystem;
 
 namespace {
 
+enum class SampleFormat {
+  TorchFile,
+  Hdf5Dataset,
+};
+
 struct SampleRecord {
   fs::path path;
   int64_t label;
+  SampleFormat format = SampleFormat::TorchFile;
+  std::string hdf5_dataset;
+  uint64_t hdf5_offset = 0;
+  uint64_t hdf5_length = 0;
+  bool hdf5_has_slice = false;
 };
 
 struct TransformPipelineImpl {
@@ -114,7 +128,21 @@ struct DataLoaderImpl {
   std::vector<size_t> indices;
   size_t cursor = 0;
   bool shuffle = false;
+  bool drop_last = false;
   std::mt19937 rng{std::random_device{}()};
+
+  size_t len() const {
+    if (batch_size == 0) {
+      return 0;
+    }
+    const auto sample_count = indices.empty() && dataset != nullptr
+        ? dataset->samples.size()
+        : indices.size();
+    if (drop_last) {
+      return sample_count / batch_size;
+    }
+    return (sample_count + batch_size - 1) / batch_size;
+  }
 
   void reset() {
     indices.resize(dataset->samples.size());
@@ -145,6 +173,314 @@ T protect(Fn&& fn, T failure) {
   return failure;
 }
 
+bool is_hdf5_path(const fs::path& path) {
+  const auto extension = path.extension().string();
+  return extension == ".h5" || extension == ".hdf5";
+}
+
+bool is_tensor_data_path(const fs::path& path) {
+  return path.extension() == ".pt" || is_hdf5_path(path);
+}
+
+#ifdef RTORCH_WITH_HDF5
+struct Hdf5Handle {
+  hid_t id = -1;
+  herr_t (*close_fn)(hid_t) = nullptr;
+
+  Hdf5Handle() = default;
+  Hdf5Handle(hid_t id, herr_t (*close_fn)(hid_t)) : id(id), close_fn(close_fn) {}
+  Hdf5Handle(const Hdf5Handle&) = delete;
+  Hdf5Handle& operator=(const Hdf5Handle&) = delete;
+  Hdf5Handle(Hdf5Handle&& other) noexcept : id(other.id), close_fn(other.close_fn) {
+    other.id = -1;
+    other.close_fn = nullptr;
+  }
+  Hdf5Handle& operator=(Hdf5Handle&& other) noexcept {
+    if (this != &other) {
+      close();
+      id = other.id;
+      close_fn = other.close_fn;
+      other.id = -1;
+      other.close_fn = nullptr;
+    }
+    return *this;
+  }
+  ~Hdf5Handle() {
+    close();
+  }
+
+  void close() {
+    if (id >= 0 && close_fn != nullptr) {
+      close_fn(id);
+    }
+    id = -1;
+    close_fn = nullptr;
+  }
+
+  operator hid_t() const {
+    return id;
+  }
+};
+
+struct Hdf5StructureSpan {
+  int64_t offset;
+  int32_t length;
+};
+
+bool hdf5_dataset_exists(hid_t file, const std::string& dataset_name) {
+  return H5Lexists(file, dataset_name.c_str(), H5P_DEFAULT) > 0;
+}
+
+std::string resolve_hdf5_dataset_name(hid_t file, const std::string& requested) {
+  if (!requested.empty()) {
+    if (!hdf5_dataset_exists(file, requested)) {
+      throw std::runtime_error("HDF5 dataset does not exist: " + requested);
+    }
+    return requested;
+  }
+
+  const std::vector<std::string> candidates{"tensor", "data", "positions"};
+  for (const auto& candidate : candidates) {
+    if (hdf5_dataset_exists(file, candidate)) {
+      return candidate;
+    }
+  }
+
+  throw std::runtime_error(
+      "HDF5 file does not contain a default tensor dataset; expected tensor, data, or positions");
+}
+
+Hdf5Handle open_hdf5_file(const fs::path& path) {
+  auto file = H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  if (file < 0) {
+    throw std::runtime_error("failed to open HDF5 file: " + path.string());
+  }
+  return Hdf5Handle(file, H5Fclose);
+}
+
+std::vector<hsize_t> hdf5_dataset_dims(hid_t dataset) {
+  Hdf5Handle space(H5Dget_space(dataset), H5Sclose);
+  const auto rank = H5Sget_simple_extent_ndims(space);
+  if (rank < 0) {
+    throw std::runtime_error("failed to inspect HDF5 dataset rank");
+  }
+
+  std::vector<hsize_t> dims(static_cast<size_t>(rank));
+  if (rank > 0 && H5Sget_simple_extent_dims(space, dims.data(), nullptr) < 0) {
+    throw std::runtime_error("failed to inspect HDF5 dataset shape");
+  }
+  return dims;
+}
+
+std::vector<Hdf5StructureSpan> read_hdf5_structure_spans(hid_t file) {
+  if (!hdf5_dataset_exists(file, "structures")) {
+    return {};
+  }
+
+  Hdf5Handle dataset(H5Dopen2(file, "structures", H5P_DEFAULT), H5Dclose);
+  if (dataset.id < 0) {
+    throw std::runtime_error("failed to open HDF5 structures dataset");
+  }
+
+  auto dims = hdf5_dataset_dims(dataset);
+  if (dims.size() != 1) {
+    throw std::runtime_error("HDF5 structures dataset must be one-dimensional");
+  }
+
+  Hdf5Handle memory_type(
+      H5Tcreate(H5T_COMPOUND, sizeof(Hdf5StructureSpan)),
+      H5Tclose);
+  if (memory_type.id < 0 ||
+      H5Tinsert(memory_type, "offset", HOFFSET(Hdf5StructureSpan, offset), H5T_NATIVE_LLONG) < 0 ||
+      H5Tinsert(memory_type, "length", HOFFSET(Hdf5StructureSpan, length), H5T_NATIVE_INT) < 0) {
+    throw std::runtime_error("failed to create HDF5 structures memory type");
+  }
+
+  std::vector<Hdf5StructureSpan> spans(static_cast<size_t>(dims[0]));
+  if (H5Dread(dataset, memory_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, spans.data()) < 0) {
+    throw std::runtime_error("failed to read HDF5 structures offsets");
+  }
+  return spans;
+}
+
+size_t hdf5_element_count(const std::vector<hsize_t>& dims) {
+  size_t count = 1;
+  for (const auto dim : dims) {
+    count *= static_cast<size_t>(dim);
+  }
+  return count;
+}
+
+std::vector<int64_t> hdf5_torch_shape(const std::vector<hsize_t>& dims) {
+  std::vector<int64_t> shape;
+  shape.reserve(dims.size());
+  for (const auto dim : dims) {
+    if (dim > static_cast<hsize_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::runtime_error("HDF5 dataset dimension exceeds int64_t");
+    }
+    shape.push_back(static_cast<int64_t>(dim));
+  }
+  return shape;
+}
+
+template <typename T>
+torch::Tensor read_hdf5_values(
+    hid_t dataset,
+    hid_t native_type,
+    c10::ScalarType torch_type,
+    const SampleRecord& sample) {
+  auto file_dims = hdf5_dataset_dims(dataset);
+  if (sample.hdf5_has_slice && file_dims.empty()) {
+    throw std::runtime_error("cannot slice a scalar HDF5 dataset");
+  }
+
+  std::vector<hsize_t> read_dims = file_dims;
+  Hdf5Handle file_space(H5Dget_space(dataset), H5Sclose);
+  Hdf5Handle memory_space;
+
+  if (sample.hdf5_has_slice) {
+    const auto offset = static_cast<hsize_t>(sample.hdf5_offset);
+    const auto length = static_cast<hsize_t>(sample.hdf5_length);
+    if (offset > file_dims[0] || length > file_dims[0] - offset) {
+      throw std::runtime_error("HDF5 slice exceeds dataset bounds");
+    }
+
+    std::vector<hsize_t> starts(file_dims.size(), 0);
+    read_dims[0] = length;
+    starts[0] = offset;
+
+    if (H5Sselect_hyperslab(
+            file_space,
+            H5S_SELECT_SET,
+            starts.data(),
+            nullptr,
+            read_dims.data(),
+            nullptr) < 0) {
+      throw std::runtime_error("failed to select HDF5 hyperslab");
+    }
+
+    memory_space = Hdf5Handle(
+        H5Screate_simple(static_cast<int>(read_dims.size()), read_dims.data(), nullptr),
+        H5Sclose);
+  } else {
+    memory_space = Hdf5Handle(H5S_ALL, nullptr);
+  }
+
+  auto count = hdf5_element_count(read_dims);
+  std::vector<T> values(count);
+  auto memory_id = sample.hdf5_has_slice ? memory_space.id : H5S_ALL;
+  auto file_id = sample.hdf5_has_slice ? file_space.id : H5S_ALL;
+  if (H5Dread(dataset, native_type, memory_id, file_id, H5P_DEFAULT, values.data()) < 0) {
+    throw std::runtime_error("failed to read HDF5 tensor data");
+  }
+
+  auto shape = hdf5_torch_shape(read_dims);
+  return torch::from_blob(
+             values.data(),
+             shape,
+             torch::TensorOptions().dtype(torch_type))
+      .clone();
+}
+
+torch::Tensor read_hdf5_tensor(const SampleRecord& sample) {
+  auto file = open_hdf5_file(sample.path);
+  const auto dataset_name = resolve_hdf5_dataset_name(file, sample.hdf5_dataset);
+  Hdf5Handle dataset(H5Dopen2(file, dataset_name.c_str(), H5P_DEFAULT), H5Dclose);
+  if (dataset.id < 0) {
+    throw std::runtime_error("failed to open HDF5 dataset: " + dataset_name);
+  }
+
+  Hdf5Handle type(H5Dget_type(dataset), H5Tclose);
+  const auto type_class = H5Tget_class(type);
+  const auto size = H5Tget_size(type);
+  if (type_class == H5T_FLOAT) {
+    if (size <= sizeof(float)) {
+      return read_hdf5_values<float>(dataset, H5T_NATIVE_FLOAT, torch::kFloat32, sample);
+    }
+    return read_hdf5_values<double>(dataset, H5T_NATIVE_DOUBLE, torch::kFloat64, sample);
+  }
+
+  if (type_class == H5T_INTEGER) {
+    const auto sign = H5Tget_sign(type);
+    if (sign == H5T_SGN_NONE) {
+      if (size == sizeof(uint8_t)) {
+        return read_hdf5_values<uint8_t>(dataset, H5T_NATIVE_UCHAR, torch::kUInt8, sample);
+      }
+      return read_hdf5_values<int64_t>(dataset, H5T_NATIVE_LLONG, torch::kInt64, sample);
+    }
+    if (size <= sizeof(int8_t)) {
+      return read_hdf5_values<int8_t>(dataset, H5T_NATIVE_SCHAR, torch::kInt8, sample);
+    }
+    if (size <= sizeof(int16_t)) {
+      return read_hdf5_values<int16_t>(dataset, H5T_NATIVE_SHORT, torch::kInt16, sample);
+    }
+    if (size <= sizeof(int32_t)) {
+      return read_hdf5_values<int32_t>(dataset, H5T_NATIVE_INT, torch::kInt32, sample);
+    }
+    return read_hdf5_values<int64_t>(dataset, H5T_NATIVE_LLONG, torch::kInt64, sample);
+  }
+
+  throw std::runtime_error("HDF5 dataset type is not numeric");
+}
+
+void append_hdf5_samples(
+    TensorDatasetImpl& dataset,
+    const fs::path& path,
+    int64_t label,
+    const std::string& dataset_name) {
+  auto file = open_hdf5_file(path);
+  const auto resolved_dataset_name = resolve_hdf5_dataset_name(file, dataset_name);
+  Hdf5Handle value_dataset(
+      H5Dopen2(file, resolved_dataset_name.c_str(), H5P_DEFAULT),
+      H5Dclose);
+  auto value_dims = hdf5_dataset_dims(value_dataset);
+  auto spans = read_hdf5_structure_spans(file);
+
+  if (!spans.empty() && !value_dims.empty()) {
+    for (const auto& span : spans) {
+      if (span.offset < 0 || span.length < 0) {
+        throw std::runtime_error("HDF5 structures contain negative offset or length");
+      }
+      SampleRecord record;
+      record.path = path;
+      record.label = label;
+      record.format = SampleFormat::Hdf5Dataset;
+      record.hdf5_dataset = resolved_dataset_name;
+      record.hdf5_offset = static_cast<uint64_t>(span.offset);
+      record.hdf5_length = static_cast<uint64_t>(span.length);
+      record.hdf5_has_slice = true;
+      dataset.samples.push_back(std::move(record));
+    }
+    return;
+  }
+
+  SampleRecord record;
+  record.path = path;
+  record.label = label;
+  record.format = SampleFormat::Hdf5Dataset;
+  record.hdf5_dataset = resolved_dataset_name;
+  dataset.samples.push_back(std::move(record));
+}
+#else
+void append_hdf5_samples(
+    TensorDatasetImpl& dataset,
+    const fs::path& path,
+    int64_t label,
+    const std::string& dataset_name) {
+  SampleRecord record;
+  record.path = path;
+  record.label = label;
+  record.format = SampleFormat::Hdf5Dataset;
+  record.hdf5_dataset = dataset_name;
+  dataset.samples.push_back(std::move(record));
+}
+
+torch::Tensor read_hdf5_tensor(const SampleRecord&) {
+  throw std::runtime_error(
+      "RTorch was built without HDF5 support; install HDF5 development files and rebuild");
+}
+#endif
+
 void scan_dataset_root(TensorDatasetImpl& dataset, const fs::path& root) {
   if (!fs::exists(root)) {
     throw std::runtime_error("dataset root does not exist");
@@ -167,28 +503,37 @@ void scan_dataset_root(TensorDatasetImpl& dataset, const fs::path& root) {
 
     std::vector<fs::path> files;
     for (const auto& entry : fs::recursive_directory_iterator(class_dir)) {
-      if (entry.is_regular_file() && entry.path().extension() == ".pt") {
+      if (entry.is_regular_file() && is_tensor_data_path(entry.path())) {
         files.push_back(entry.path());
       }
     }
     std::sort(files.begin(), files.end());
 
     for (const auto& path : files) {
-      SampleRecord record;
-      record.path = path;
-      record.label = static_cast<int64_t>(class_index);
-      dataset.samples.push_back(std::move(record));
+      if (is_hdf5_path(path)) {
+        append_hdf5_samples(dataset, path, static_cast<int64_t>(class_index), "");
+      } else {
+        SampleRecord record;
+        record.path = path;
+        record.label = static_cast<int64_t>(class_index);
+        record.format = SampleFormat::TorchFile;
+        dataset.samples.push_back(std::move(record));
+      }
     }
   }
 
   if (dataset.samples.empty()) {
-    throw std::runtime_error("dataset contains no .pt files");
+    throw std::runtime_error("dataset contains no .pt, .h5, or .hdf5 files");
   }
 }
 
-torch::Tensor load_tensor_from_file(const fs::path& path) {
+torch::Tensor load_tensor_from_sample(const SampleRecord& sample) {
+  if (sample.format == SampleFormat::Hdf5Dataset) {
+    return read_hdf5_tensor(sample);
+  }
+
   torch::Tensor tensor;
-  torch::load(tensor, path.string());
+  torch::load(tensor, sample.path.string());
   return tensor;
 }
 
@@ -374,6 +719,26 @@ struct RtOwnedBatch {
 struct RtTensor {
   torch::Tensor inner;
 };
+
+std::unique_ptr<RtOwnedBatch> make_owned_batch(
+    const torch::Tensor& tensor,
+    std::vector<int64_t> labels) {
+  auto owned =
+      tensor
+          .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32))
+          .contiguous();
+  auto batch = std::make_unique<RtOwnedBatch>();
+  batch->inner.tensor = owned;
+  batch->inner.shape.assign(owned.sizes().begin(), owned.sizes().end());
+  batch->inner.labels = std::move(labels);
+
+  const auto count = static_cast<size_t>(owned.numel());
+  batch->inner.statistics = calculate_statistics(owned);
+
+  batch->inner.data.resize(count);
+  std::memcpy(batch->inner.data.data(), owned.data_ptr<float>(), count * sizeof(float));
+  return batch;
+}
 
 extern "C" char* rt_last_error_message(void) {
   char* message = static_cast<char*>(std::malloc(g_last_error.size() + 1));
@@ -719,6 +1084,27 @@ extern "C" RtTensorDataset* rt_tensor_dataset_new(const char* root) {
   }, nullptr);
 }
 
+extern "C" RtTensorDataset* rt_tensor_dataset_hdf5_file_new(
+    const char* path,
+    const char* dataset_name) {
+  return protect<RtTensorDataset*>([&]() {
+    if (path == nullptr || dataset_name == nullptr) {
+      throw std::runtime_error("HDF5 path or dataset name was null");
+    }
+#ifndef RTORCH_WITH_HDF5
+    throw std::runtime_error(
+        "RTorch was built without HDF5 support; install HDF5 development files and rebuild");
+    return static_cast<RtTensorDataset*>(nullptr);
+#else
+    auto dataset = std::make_unique<RtTensorDataset>();
+    const fs::path hdf5_path(path);
+    dataset->inner.class_names.push_back(hdf5_path.stem().string());
+    append_hdf5_samples(dataset->inner, hdf5_path, 0, dataset_name);
+    return dataset.release();
+#endif
+  }, nullptr);
+}
+
 extern "C" void rt_tensor_dataset_free(RtTensorDataset* dataset) {
   delete dataset;
 }
@@ -755,11 +1141,41 @@ extern "C" const char* rt_tensor_dataset_class_name(
   }, nullptr);
 }
 
+extern "C" RtOwnedBatch* rt_tensor_dataset_get(
+    const RtTensorDataset* dataset,
+    size_t index,
+    RtTransformPipeline* pipeline) {
+  return protect<RtOwnedBatch*>([&]() {
+    if (dataset == nullptr) {
+      throw std::runtime_error("dataset pointer was null");
+    }
+    if (index >= dataset->inner.samples.size()) {
+      throw std::runtime_error("dataset index out of range");
+    }
+
+    const auto& sample = dataset->inner.samples[index];
+    auto tensor = load_tensor_from_sample(sample);
+    if (pipeline != nullptr) {
+      tensor = pipeline->inner.apply(tensor);
+    }
+    return make_owned_batch(tensor, std::vector<int64_t>{sample.label}).release();
+  }, nullptr);
+}
+
 extern "C" RtDataLoader* rt_data_loader_new(
     RtTensorDataset* dataset,
     RtTransformPipeline* pipeline,
     size_t batch_size,
     bool shuffle) {
+  return rt_data_loader_new_with_options(dataset, pipeline, batch_size, shuffle, false);
+}
+
+extern "C" RtDataLoader* rt_data_loader_new_with_options(
+    RtTensorDataset* dataset,
+    RtTransformPipeline* pipeline,
+    size_t batch_size,
+    bool shuffle,
+    bool drop_last) {
   return protect<RtDataLoader*>([&]() {
     if (dataset == nullptr) {
       throw std::runtime_error("dataset pointer was null");
@@ -773,6 +1189,7 @@ extern "C" RtDataLoader* rt_data_loader_new(
     loader->inner.pipeline = pipeline == nullptr ? nullptr : &pipeline->inner;
     loader->inner.batch_size = batch_size;
     loader->inner.shuffle = shuffle;
+    loader->inner.drop_last = drop_last;
     loader->inner.reset();
     return loader.release();
   }, nullptr);
@@ -780,6 +1197,15 @@ extern "C" RtDataLoader* rt_data_loader_new(
 
 extern "C" void rt_data_loader_free(RtDataLoader* loader) {
   delete loader;
+}
+
+extern "C" size_t rt_data_loader_len(const RtDataLoader* loader) {
+  return protect<size_t>([&]() {
+    if (loader == nullptr) {
+      throw std::runtime_error("loader pointer was null");
+    }
+    return loader->inner.len();
+  }, 0);
 }
 
 extern "C" bool rt_data_loader_reset(RtDataLoader* loader) {
@@ -803,6 +1229,11 @@ extern "C" int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out) {
     }
 
     const auto remaining = loader->inner.indices.size() - loader->inner.cursor;
+    if (loader->inner.drop_last && remaining < loader->inner.batch_size) {
+      loader->inner.cursor = loader->inner.indices.size();
+      *out = nullptr;
+      return RT_STATUS_END;
+    }
     const auto take = std::min(loader->inner.batch_size, remaining);
 
     std::vector<torch::Tensor> batch_tensors;
@@ -813,7 +1244,7 @@ extern "C" int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out) {
     for (size_t i = 0; i < take; ++i) {
       const auto sample_index = loader->inner.indices[loader->inner.cursor + i];
       const auto& sample = loader->inner.dataset->samples[sample_index];
-      auto tensor = load_tensor_from_file(sample.path);
+      auto tensor = load_tensor_from_sample(sample);
       if (loader->inner.pipeline != nullptr) {
         tensor = loader->inner.pipeline->apply(tensor);
       }
@@ -821,21 +1252,7 @@ extern "C" int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out) {
       labels.push_back(sample.label);
     }
 
-    auto stacked = torch::stack(batch_tensors);
-    auto owned =
-        stacked
-            .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32))
-            .contiguous();
-    auto batch = std::make_unique<RtOwnedBatch>();
-    batch->inner.tensor = owned;
-    batch->inner.shape.assign(owned.sizes().begin(), owned.sizes().end());
-    batch->inner.labels = std::move(labels);
-
-    const auto count = static_cast<size_t>(owned.numel());
-    batch->inner.statistics = calculate_statistics(owned);
-
-    batch->inner.data.resize(count);
-    std::memcpy(batch->inner.data.data(), owned.data_ptr<float>(), count * sizeof(float));
+    auto batch = make_owned_batch(torch::stack(batch_tensors), std::move(labels));
 
     loader->inner.cursor += take;
     *out = batch.release();

@@ -24,6 +24,8 @@ The repository currently includes:
 - basic tensor construction, inspection, addition, matrix multiplication,
   reshape, sum, backward, and gradient access
 - a dataset scanner for class-folder `.pt` tensor datasets
+- HDF5 dataset loading for `.h5` and `.hdf5` tensor data when RTorch is built
+  with native HDF5 development files available
 - a transform pipeline with these operations:
   - `to_float`
   - `resize`
@@ -32,11 +34,15 @@ The repository currently includes:
 - a batch loader with:
   - configurable `batch_size`
   - optional shuffling
+  - optional `drop_last`
+  - batch count through `len()`
+  - Rust `Iterator` support
   - iterative `next_batch()` access
 - dataset metadata APIs:
   - `len()`
   - `is_empty()`
   - `class_names()`
+- direct dataset sample access with `get(index)`
 - LibTorch-computed batch statistics:
   - element count and sum
   - mean
@@ -133,6 +139,7 @@ You need:
 - CMake
 - a C++17 compiler such as Clang
 - a local LibTorch installation
+- optional HDF5 development files for `.h5` and `.hdf5` loading
 
 RTorch expects PyTorch's LibTorch C++ distribution. The helper script downloads
 the Linux CPU C++ package into `third_party/libtorch` by default:
@@ -156,6 +163,47 @@ cargo build
 ```
 
 `LIBTORCH` must point to the LibTorch root directory containing `include/` and `lib/`.
+
+HDF5 support is enabled automatically when CMake can find HDF5. If HDF5 is
+installed outside the system search path, pass its root while building.
+
+The helper script installs HDF5 and its `libaec` runtime dependency into
+`third_party/hdf5` using conda, mamba, or micromamba:
+
+```bash
+scripts/download-hdf5.sh
+```
+
+Then build or run with both native library paths available:
+
+```bash
+source third_party/hdf5/rtorch-env.sh
+cargo build
+```
+
+Or set the variables manually:
+
+```bash
+export HDF5_ROOT="$PWD/third_party/hdf5"
+export LD_LIBRARY_PATH="$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+cargo build
+```
+
+With the local LibTorch helper too:
+
+```bash
+export LIBTORCH="$PWD/third_party/libtorch"
+export HDF5_ROOT="$PWD/third_party/hdf5"
+export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+cargo run -p rtorch --example hdf5 -- test_data/train.h5 positions
+```
+
+If you see an error such as `libhdf5.so.310: cannot open shared object file`,
+the binary was built with HDF5 but the dynamic loader cannot find the HDF5
+shared library at runtime. Set `HDF5_ROOT` and `LD_LIBRARY_PATH` as shown above,
+or run `source third_party/hdf5/rtorch-env.sh`. Activating the conda prefix alone
+does not set `HDF5_ROOT` for this build. You can also install HDF5 through your
+system package manager, for example `sudo apt install libhdf5-dev`.
 
 ## Add RTorch To A Rust Project
 
@@ -318,6 +366,49 @@ dataset/
 
 `class_names()` returns `["cats", "dogs"]`, and their labels are `0` and `1`.
 
+Class-folder datasets may contain `.pt`, `.h5`, or `.hdf5` files. For HDF5 files
+RTorch looks for a numeric dataset named `tensor`, `data`, or `positions`.
+
+### Load An HDF5 File
+
+An HDF5 file can also be loaded directly by selecting the numeric dataset to
+read:
+
+```rust
+use rtorch::{DataLoader, TensorDataset};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dataset = TensorDataset::from_hdf5_file("test_data/train.h5", "positions")?;
+    let sample = dataset.get(0)?;
+
+    println!("sample shape: {:?}", sample.shape());
+    println!("sample label: {}", sample.label());
+
+    let mut loader = DataLoader::new(&dataset, None, 1, false)?;
+
+    for batch in &mut loader {
+        let batch = batch?;
+        println!("shape: {:?}", batch.shape());
+        println!("values: {}", batch.data().len());
+    }
+
+    Ok(())
+}
+```
+
+If the HDF5 file contains a `structures` dataset with `offset` and `length`
+fields, each structure is exposed as one sample by slicing the selected numeric
+dataset along its first dimension. Otherwise, the selected dataset is returned
+as one sample. Batching still requires compatible sample shapes, so variable
+length HDF5 structures should be loaded with `batch_size = 1` unless the samples
+have matching shapes.
+
+Run the HDF5 example with:
+
+```bash
+cargo run -p rtorch --example hdf5 -- test_data/train.h5 positions
+```
+
 ### Load Batches Without Transforms
 
 ```rust
@@ -421,8 +512,10 @@ The main Rust types are:
 - `Tensor`
 - `ScalarType`
 - `TensorDataset`
+- `Sample`
 - `TransformConfig`
 - `TransformPipeline`
+- `DataLoaderConfig`
 - `DataLoader`
 - `Batch`
 - `Statistics`
@@ -434,7 +527,7 @@ Typical flow:
 1. Create a dataset from a root folder.
 2. Optionally create a transform pipeline.
 3. Create a loader from the dataset and optional transforms.
-4. Pull batches in a loop with `next_batch()`.
+4. Pull batches in a loop with `next_batch()` or by iterating the loader.
 
 Statistics can also be computed without a dataset:
 
@@ -517,6 +610,7 @@ Useful methods:
 let count = dataset.len();
 let empty = dataset.is_empty();
 let classes = dataset.class_names()?;
+let sample = dataset.get(0)?;
 ```
 
 What each method means:
@@ -524,6 +618,8 @@ What each method means:
 - `len()` returns the total number of discovered `.pt` samples across all classes
 - `is_empty()` is a convenience check based on `len()`
 - `class_names()` returns class names in the same sorted order used for label assignment
+- `get(index)` loads one sample and returns its data, shape, label, statistics,
+  and owned tensor
 
 ## How To Use The Transform Pipeline
 
@@ -640,12 +736,42 @@ If you do not want transforms:
 let mut loader = DataLoader::new(&dataset, None, 8, false)?;
 ```
 
+For Python-style `drop_last` behavior, use `DataLoaderConfig`:
+
+```rust
+let mut loader = DataLoader::with_config(
+    &dataset,
+    None,
+    DataLoaderConfig {
+        batch_size: 8,
+        shuffle: true,
+        drop_last: true,
+    },
+)?;
+```
+
+Useful methods:
+
+```rust
+let batches = loader.len();
+let empty = loader.is_empty();
+```
+
 ### Iterating Batches
 
 Call `next_batch()` until it returns `Ok(None)`:
 
 ```rust
 while let Some(batch) = loader.next_batch()? {
+    println!("{:?}", batch.shape());
+}
+```
+
+`DataLoader` also implements `Iterator<Item = Result<Batch, Error>>`:
+
+```rust
+for batch in &mut loader {
+    let batch = batch?;
     println!("{:?}", batch.shape());
 }
 ```

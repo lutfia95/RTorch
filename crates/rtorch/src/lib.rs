@@ -435,6 +435,21 @@ impl TensorDataset {
         Ok(Self { raw })
     }
 
+    pub fn from_hdf5_file(
+        path: impl AsRef<Path>,
+        dataset_name: impl AsRef<str>,
+    ) -> Result<Self, Error> {
+        let path = path_to_cstring(path.as_ref())?;
+        let dataset_name = CString::new(dataset_name.as_ref())?;
+        let raw =
+            unsafe { sys::rt_tensor_dataset_hdf5_file_new(path.as_ptr(), dataset_name.as_ptr()) };
+        if raw.is_null() {
+            return Err(take_last_error());
+        }
+
+        Ok(Self { raw })
+    }
+
     pub fn len(&self) -> usize {
         unsafe { sys::rt_tensor_dataset_len(self.raw) }
     }
@@ -462,6 +477,40 @@ impl TensorDataset {
         Ok(names)
     }
 
+    pub fn get(&self, index: usize) -> Result<Sample, Error> {
+        self.get_inner(index, None)
+    }
+
+    pub fn get_with_transform(
+        &self,
+        index: usize,
+        transform: &TransformPipeline,
+    ) -> Result<Sample, Error> {
+        self.get_inner(index, Some(transform))
+    }
+
+    fn get_inner(
+        &self,
+        index: usize,
+        transform: Option<&TransformPipeline>,
+    ) -> Result<Sample, Error> {
+        let raw = unsafe {
+            sys::rt_tensor_dataset_get(
+                self.raw,
+                index,
+                transform.map(|t| t.raw()).unwrap_or(std::ptr::null_mut()),
+            )
+        };
+        if raw.is_null() {
+            return Err(take_last_error());
+        }
+
+        Ok(Sample {
+            shape: owned_shape(raw)?,
+            raw,
+        })
+    }
+
     fn raw(&self) -> *mut sys::RtTensorDataset {
         self.raw
     }
@@ -470,6 +519,75 @@ impl TensorDataset {
 impl Drop for TensorDataset {
     fn drop(&mut self) {
         unsafe { sys::rt_tensor_dataset_free(self.raw) }
+    }
+}
+
+fn owned_shape(raw: *mut sys::RtOwnedBatch) -> Result<Vec<usize>, Error> {
+    let raw_shape = unsafe {
+        std::slice::from_raw_parts(
+            sys::rt_owned_batch_shape(raw),
+            sys::rt_owned_batch_shape_len(raw),
+        )
+    };
+    let mut shape = Vec::with_capacity(raw_shape.len());
+    for value in raw_shape {
+        let converted = match (*value).try_into() {
+            Ok(converted) => converted,
+            Err(_) => {
+                unsafe { sys::rt_owned_batch_free(raw) };
+                return Err(Error::ShapeOverflow);
+            }
+        };
+        shape.push(converted);
+    }
+    Ok(shape)
+}
+
+#[derive(Debug)]
+pub struct Sample {
+    raw: *mut sys::RtOwnedBatch,
+    shape: Vec<usize>,
+}
+
+impl Sample {
+    pub fn data(&self) -> &[f32] {
+        let ptr = unsafe { sys::rt_owned_batch_data(self.raw) };
+        let len = unsafe { sys::rt_owned_batch_data_len(self.raw) };
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn label(&self) -> i64 {
+        let ptr = unsafe { sys::rt_owned_batch_labels(self.raw) };
+        let len = unsafe { sys::rt_owned_batch_labels_len(self.raw) };
+        debug_assert_eq!(len, 1);
+        if len == 0 {
+            return 0;
+        }
+        unsafe { *ptr }
+    }
+
+    pub fn statistics(&self) -> Result<Statistics, Error> {
+        let mut raw = sys::RtStatistics::default();
+        let ok = unsafe { sys::rt_owned_batch_statistics(self.raw, &mut raw) };
+        if !ok {
+            return Err(take_last_error());
+        }
+
+        Ok(statistics_from_raw(raw))
+    }
+
+    pub fn tensor(&self) -> Result<Tensor, Error> {
+        Tensor::from_raw(unsafe { sys::rt_owned_batch_tensor(self.raw) })
+    }
+}
+
+impl Drop for Sample {
+    fn drop(&mut self) {
+        unsafe { sys::rt_owned_batch_free(self.raw) }
     }
 }
 
@@ -525,6 +643,23 @@ pub struct DataLoader<'a> {
     _transforms: PhantomData<&'a TransformPipeline>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DataLoaderConfig {
+    pub batch_size: usize,
+    pub shuffle: bool,
+    pub drop_last: bool,
+}
+
+impl Default for DataLoaderConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 1,
+            shuffle: false,
+            drop_last: false,
+        }
+    }
+}
+
 impl<'a> DataLoader<'a> {
     pub fn new(
         dataset: &'a TensorDataset,
@@ -532,12 +667,29 @@ impl<'a> DataLoader<'a> {
         batch_size: usize,
         shuffle: bool,
     ) -> Result<Self, Error> {
-        let raw = unsafe {
-            sys::rt_data_loader_new(
-                dataset.raw(),
-                transforms.map(|t| t.raw()).unwrap_or(std::ptr::null_mut()),
+        Self::with_config(
+            dataset,
+            transforms,
+            DataLoaderConfig {
                 batch_size,
                 shuffle,
+                drop_last: false,
+            },
+        )
+    }
+
+    pub fn with_config(
+        dataset: &'a TensorDataset,
+        transforms: Option<&'a TransformPipeline>,
+        config: DataLoaderConfig,
+    ) -> Result<Self, Error> {
+        let raw = unsafe {
+            sys::rt_data_loader_new_with_options(
+                dataset.raw(),
+                transforms.map(|t| t.raw()).unwrap_or(std::ptr::null_mut()),
+                config.batch_size,
+                config.shuffle,
+                config.drop_last,
             )
         };
 
@@ -550,6 +702,14 @@ impl<'a> DataLoader<'a> {
             _dataset: PhantomData,
             _transforms: PhantomData,
         })
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe { sys::rt_data_loader_len(self.raw) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn reset(&mut self) -> Result<(), Error> {
@@ -572,27 +732,25 @@ impl<'a> DataLoader<'a> {
                         "backend returned success without a batch".to_string(),
                     ));
                 }
-                let raw_shape = unsafe {
-                    std::slice::from_raw_parts(
-                        sys::rt_owned_batch_shape(batch),
-                        sys::rt_owned_batch_shape_len(batch),
-                    )
-                };
-                let mut shape = Vec::with_capacity(raw_shape.len());
-                for value in raw_shape {
-                    let converted = match (*value).try_into() {
-                        Ok(converted) => converted,
-                        Err(_) => {
-                            unsafe { sys::rt_owned_batch_free(batch) };
-                            return Err(Error::ShapeOverflow);
-                        }
-                    };
-                    shape.push(converted);
-                }
-                Ok(Some(Batch { raw: batch, shape }))
+                Ok(Some(Batch {
+                    shape: owned_shape(batch)?,
+                    raw: batch,
+                }))
             }
             sys::RT_STATUS_END => Ok(None),
             _ => Err(take_last_error()),
+        }
+    }
+}
+
+impl Iterator for DataLoader<'_> {
+    type Item = Result<Batch, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_batch() {
+            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
         }
     }
 }

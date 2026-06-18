@@ -1,4 +1,5 @@
 /target
 /build
 /third_party/libtorch
+/third_party/hdf5
 .DS_Store

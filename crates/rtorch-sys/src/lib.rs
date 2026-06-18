@@ -119,6 +119,10 @@ unsafe extern "C" {
     pub fn rt_transform_pipeline_free(pipeline: *mut RtTransformPipeline);
 
     pub fn rt_tensor_dataset_new(root: *const c_char) -> *mut RtTensorDataset;
+    pub fn rt_tensor_dataset_hdf5_file_new(
+        path: *const c_char,
+        dataset_name: *const c_char,
+    ) -> *mut RtTensorDataset;
     pub fn rt_tensor_dataset_free(dataset: *mut RtTensorDataset);
     pub fn rt_tensor_dataset_len(dataset: *const RtTensorDataset) -> usize;
     pub fn rt_tensor_dataset_class_count(dataset: *const RtTensorDataset) -> usize;
@@ -126,6 +130,11 @@ unsafe extern "C" {
         dataset: *const RtTensorDataset,
         class_index: usize,
     ) -> *const c_char;
+    pub fn rt_tensor_dataset_get(
+        dataset: *const RtTensorDataset,
+        index: usize,
+        pipeline: *mut RtTransformPipeline,
+    ) -> *mut RtOwnedBatch;
 
     pub fn rt_data_loader_new(
         dataset: *mut RtTensorDataset,
@@ -133,7 +142,15 @@ unsafe extern "C" {
         batch_size: usize,
         shuffle: bool,
     ) -> *mut RtDataLoader;
+    pub fn rt_data_loader_new_with_options(
+        dataset: *mut RtTensorDataset,
+        pipeline: *mut RtTransformPipeline,
+        batch_size: usize,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> *mut RtDataLoader;
     pub fn rt_data_loader_free(loader: *mut RtDataLoader);
+    pub fn rt_data_loader_len(loader: *const RtDataLoader) -> usize;
     pub fn rt_data_loader_reset(loader: *mut RtDataLoader) -> bool;
     pub fn rt_data_loader_next(loader: *mut RtDataLoader, out: *mut *mut RtOwnedBatch) -> c_int;
 

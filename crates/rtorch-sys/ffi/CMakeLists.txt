@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 find_package(Torch REQUIRED)
+find_package(HDF5 COMPONENTS C QUIET)
 
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${TORCH_INCLUDE_DIRS})
@@ -30,6 +31,11 @@ if(RTORCH_HAS_EXTENDED_UNSIGNED_TYPES)
   target_compile_definitions(rtorch_ffi PRIVATE RTORCH_HAS_EXTENDED_UNSIGNED_TYPES=1)
 endif()
 
+if(HDF5_FOUND)
+  target_compile_definitions(rtorch_ffi PRIVATE RTORCH_WITH_HDF5=1)
+  target_include_directories(rtorch_ffi PRIVATE ${HDF5_INCLUDE_DIRS})
+endif()
+
 target_include_directories(rtorch_ffi PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -37,6 +43,15 @@ target_include_directories(rtorch_ffi PUBLIC
 target_link_libraries(rtorch_ffi PUBLIC
   ${TORCH_LIBRARIES}
 )
+
+if(HDF5_FOUND)
+  target_link_libraries(rtorch_ffi PUBLIC ${HDF5_C_LIBRARIES})
+  file(WRITE "${CMAKE_BINARY_DIR}/rtorch-hdf5-link-libs.txt" "")
+  foreach(HDF5_LIBRARY ${HDF5_C_LIBRARIES})
+    file(APPEND "${CMAKE_BINARY_DIR}/rtorch-hdf5-link-libs.txt" "${HDF5_LIBRARY}\n")
+  endforeach()
+  install(FILES "${CMAKE_BINARY_DIR}/rtorch-hdf5-link-libs.txt" DESTINATION lib)
+endif()
 
 install(TARGETS rtorch_ffi
   ARCHIVE DESTINATION lib
