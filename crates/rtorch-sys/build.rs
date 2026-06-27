@@ -16,6 +16,11 @@ fn main() {
     cmake
         .define("CMAKE_PREFIX_PATH", &libtorch_path)
         .define("CMAKE_CXX_STANDARD", "17");
+    let hdf5_enabled = env::var_os("CARGO_FEATURE_HDF5").is_some();
+    cmake.define(
+        "RTORCH_ENABLE_HDF5",
+        if hdf5_enabled { "ON" } else { "OFF" },
+    );
     if let Ok(hdf5_root) = env::var("HDF5_ROOT") {
         cmake.define("HDF5_ROOT", hdf5_root);
     }
@@ -37,7 +42,9 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=torch");
     println!("cargo:rustc-link-lib=dylib=torch_cpu");
     println!("cargo:rustc-link-lib=dylib=c10");
-    emit_hdf5_link_flags(dst.join("lib").join("rtorch-hdf5-link-libs.txt"));
+    if hdf5_enabled {
+        emit_hdf5_link_flags(dst.join("lib").join("rtorch-hdf5-link-libs.txt"));
+    }
 
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("macos") => println!("cargo:rustc-link-lib=dylib=c++"),

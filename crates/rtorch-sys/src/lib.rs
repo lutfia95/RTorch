@@ -154,13 +154,16 @@ unsafe extern "C" {
     pub fn rt_data_loader_reset(loader: *mut RtDataLoader) -> bool;
     pub fn rt_data_loader_next(loader: *mut RtDataLoader, out: *mut *mut RtOwnedBatch) -> c_int;
 
-    pub fn rt_owned_batch_data(batch: *const RtOwnedBatch) -> *const f32;
-    pub fn rt_owned_batch_data_len(batch: *const RtOwnedBatch) -> usize;
+    pub fn rt_owned_batch_data_view(
+        batch: *mut RtOwnedBatch,
+        out_data: *mut *const f32,
+        out_len: *mut usize,
+    ) -> bool;
     pub fn rt_owned_batch_shape(batch: *const RtOwnedBatch) -> *const i64;
     pub fn rt_owned_batch_shape_len(batch: *const RtOwnedBatch) -> usize;
     pub fn rt_owned_batch_labels(batch: *const RtOwnedBatch) -> *const i64;
     pub fn rt_owned_batch_labels_len(batch: *const RtOwnedBatch) -> usize;
-    pub fn rt_owned_batch_statistics(batch: *const RtOwnedBatch, out: *mut RtStatistics) -> bool;
+    pub fn rt_owned_batch_statistics(batch: *mut RtOwnedBatch, out: *mut RtStatistics) -> bool;
     pub fn rt_owned_batch_tensor(batch: *const RtOwnedBatch) -> *mut RtTensor;
     pub fn rt_owned_batch_free(batch: *mut RtOwnedBatch);
 }

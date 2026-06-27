@@ -68,6 +68,10 @@ find_conda() {
 }
 
 print_env() {
+  local loader_path_var="LD_LIBRARY_PATH"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    loader_path_var="DYLD_LIBRARY_PATH"
+  fi
   cat <<EOF
 
 HDF5 is installed at:
@@ -78,23 +82,27 @@ Use it with one command:
 
 Or set the variables manually:
   export HDF5_ROOT="$HDF5_DIR"
-  export LD_LIBRARY_PATH="\$HDF5_ROOT/lib:\${LD_LIBRARY_PATH:-}"
-  cargo build
+  export $loader_path_var="\$HDF5_ROOT/lib:\${$loader_path_var:-}"
+  cargo build --features hdf5
 
 If you also use the local LibTorch helper:
   export HDF5_ROOT="$HDF5_DIR"
   export LIBTORCH="$REPO_ROOT/third_party/libtorch"
-  export LD_LIBRARY_PATH="\$LIBTORCH/lib:\$HDF5_ROOT/lib:\${LD_LIBRARY_PATH:-}"
+  export $loader_path_var="\$LIBTORCH/lib:\$HDF5_ROOT/lib:\${$loader_path_var:-}"
 EOF
 }
 
 write_env_file() {
+  local loader_path_var="LD_LIBRARY_PATH"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    loader_path_var="DYLD_LIBRARY_PATH"
+  fi
   cat >"$HDF5_DIR/rtorch-env.sh" <<EOF
 # Source this file before building or running RTorch with HDF5 support:
 #   source "$HDF5_DIR/rtorch-env.sh"
 export HDF5_ROOT="$HDF5_DIR"
 export LIBTORCH="$REPO_ROOT/third_party/libtorch"
-export LD_LIBRARY_PATH="\$LIBTORCH/lib:\$HDF5_ROOT/lib:\${LD_LIBRARY_PATH:-}"
+export $loader_path_var="\$LIBTORCH/lib:\$HDF5_ROOT/lib:\${$loader_path_var:-}"
 EOF
 }
 

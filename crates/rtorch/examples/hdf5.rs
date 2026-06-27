@@ -19,8 +19,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("first sample shape: {:?}", sample.shape());
     println!("first sample label: {:?}", sample.label());
 
-    
-
     let mut loader = DataLoader::with_config(
         &dataset,
         None,

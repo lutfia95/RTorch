@@ -137,13 +137,15 @@ size_t rt_data_loader_len(const RtDataLoader* loader);
 bool rt_data_loader_reset(RtDataLoader* loader);
 int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out);
 
-const float* rt_owned_batch_data(const RtOwnedBatch* batch);
-size_t rt_owned_batch_data_len(const RtOwnedBatch* batch);
+bool rt_owned_batch_data_view(
+    RtOwnedBatch* batch,
+    const float** out_data,
+    size_t* out_len);
 const int64_t* rt_owned_batch_shape(const RtOwnedBatch* batch);
 size_t rt_owned_batch_shape_len(const RtOwnedBatch* batch);
 const int64_t* rt_owned_batch_labels(const RtOwnedBatch* batch);
 size_t rt_owned_batch_labels_len(const RtOwnedBatch* batch);
-bool rt_owned_batch_statistics(const RtOwnedBatch* batch, RtStatistics* out);
+bool rt_owned_batch_statistics(RtOwnedBatch* batch, RtStatistics* out);
 RtTensor* rt_owned_batch_tensor(const RtOwnedBatch* batch);
 void rt_owned_batch_free(RtOwnedBatch* batch);
 

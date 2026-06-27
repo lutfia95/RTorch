@@ -523,11 +523,18 @@ impl Drop for TensorDataset {
 }
 
 fn owned_shape(raw: *mut sys::RtOwnedBatch) -> Result<Vec<usize>, Error> {
-    let raw_shape = unsafe {
-        std::slice::from_raw_parts(
-            sys::rt_owned_batch_shape(raw),
-            sys::rt_owned_batch_shape_len(raw),
-        )
+    let len = unsafe { sys::rt_owned_batch_shape_len(raw) };
+    let ptr = unsafe { sys::rt_owned_batch_shape(raw) };
+    if len > 0 && ptr.is_null() {
+        unsafe { sys::rt_owned_batch_free(raw) };
+        return Err(Error::Backend(
+            "backend returned a null shape pointer".to_string(),
+        ));
+    }
+    let raw_shape = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     };
     let mut shape = Vec::with_capacity(raw_shape.len());
     for value in raw_shape {
@@ -550,10 +557,9 @@ pub struct Sample {
 }
 
 impl Sample {
-    pub fn data(&self) -> &[f32] {
-        let ptr = unsafe { sys::rt_owned_batch_data(self.raw) };
-        let len = unsafe { sys::rt_owned_batch_data_len(self.raw) };
-        unsafe { std::slice::from_raw_parts(ptr, len) }
+    /// Materializes a contiguous CPU float32 view on first use.
+    pub fn data(&self) -> Result<&[f32], Error> {
+        owned_data(self.raw, &self.raw)
     }
 
     pub fn shape(&self) -> &[usize] {
@@ -567,6 +573,7 @@ impl Sample {
         if len == 0 {
             return 0;
         }
+        assert!(!ptr.is_null(), "backend returned a null label pointer");
         unsafe { *ptr }
     }
 
@@ -598,10 +605,9 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn data(&self) -> &[f32] {
-        let ptr = unsafe { sys::rt_owned_batch_data(self.raw) };
-        let len = unsafe { sys::rt_owned_batch_data_len(self.raw) };
-        unsafe { std::slice::from_raw_parts(ptr, len) }
+    /// Materializes a contiguous CPU float32 view on first use.
+    pub fn data(&self) -> Result<&[f32], Error> {
+        owned_data(self.raw, &self.raw)
     }
 
     pub fn shape(&self) -> &[usize] {
@@ -611,7 +617,12 @@ impl Batch {
     pub fn labels(&self) -> &[i64] {
         let ptr = unsafe { sys::rt_owned_batch_labels(self.raw) };
         let len = unsafe { sys::rt_owned_batch_labels_len(self.raw) };
-        unsafe { std::slice::from_raw_parts(ptr, len) }
+        if len == 0 {
+            &[]
+        } else {
+            assert!(!ptr.is_null(), "backend returned a null labels pointer");
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        }
     }
 
     /// Returns aggregate statistics computed by LibTorch over all batch elements.
@@ -629,6 +640,26 @@ impl Batch {
     pub fn tensor(&self) -> Result<Tensor, Error> {
         Tensor::from_raw(unsafe { sys::rt_owned_batch_tensor(self.raw) })
     }
+}
+
+fn owned_data<'a>(
+    raw: *mut sys::RtOwnedBatch,
+    _owner: &'a *mut sys::RtOwnedBatch,
+) -> Result<&'a [f32], Error> {
+    let mut ptr = std::ptr::null();
+    let mut len = 0;
+    if !unsafe { sys::rt_owned_batch_data_view(raw, &mut ptr, &mut len) } {
+        return Err(take_last_error());
+    }
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
+        return Err(Error::Backend(
+            "backend returned a null data pointer".to_string(),
+        ));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
 }
 
 impl Drop for Batch {
@@ -763,7 +794,61 @@ impl Drop for DataLoader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bf16, f16, statistics, ScalarType, Tensor};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{
+        bf16, f16, statistics, DataLoader, ScalarType, Tensor, TensorDataset, TransformConfig,
+        TransformPipeline,
+    };
+
+    static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("rtorch-{name}-{}-{id}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn decode_base64(input: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+        let mut buffer = 0_u32;
+        let mut bits = 0_u8;
+        for byte in input.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+            if byte == b'=' {
+                break;
+            }
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => panic!("invalid base64 test fixture"),
+            };
+            buffer = (buffer << 6) | u32::from(value);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                output.push((buffer >> bits) as u8);
+                buffer &= (1_u32 << bits) - 1;
+            }
+        }
+        output
+    }
 
     fn assert_close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1.0e-12);
@@ -861,5 +946,84 @@ mod tests {
         total.backward().unwrap();
 
         assert_eq!(tensor.grad().unwrap().to_vec_f32().unwrap(), vec![2.0; 3]);
+    }
+
+    #[test]
+    fn loads_python_torch_save_tensor_and_batches_it() {
+        let root = TestDirectory::new("python-pt");
+        let class_dir = root.0.join("example");
+        fs::create_dir(&class_dir).unwrap();
+        fs::write(
+            class_dir.join("sample.pt"),
+            decode_base64(include_str!("../../../test_data/python_tensor.pt.base64")),
+        )
+        .unwrap();
+
+        let dataset = TensorDataset::from_class_folders(&root.0).unwrap();
+        assert_eq!(dataset.len(), 1);
+        assert_eq!(dataset.class_names().unwrap(), ["example"]);
+
+        let sample = dataset.get(0).unwrap();
+        assert_eq!(sample.shape(), [2, 3]);
+        assert_eq!(sample.data().unwrap(), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(
+            sample.tensor().unwrap().scalar_type().unwrap(),
+            ScalarType::F32
+        );
+
+        let mut loader = DataLoader::new(&dataset, None, 1, false).unwrap();
+        let batch = loader.next().unwrap().unwrap();
+        assert_eq!(batch.shape(), [1, 2, 3]);
+        assert_eq!(batch.labels(), [0]);
+        assert_eq!(batch.data().unwrap(), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert!(loader.next().is_none());
+    }
+
+    #[test]
+    fn loader_stops_after_a_sample_error_and_can_be_reset() {
+        let root = TestDirectory::new("loader-error");
+        let class_dir = root.0.join("broken");
+        fs::create_dir(&class_dir).unwrap();
+        fs::write(class_dir.join("sample.pt"), b"not a tensor archive").unwrap();
+
+        let dataset = TensorDataset::from_class_folders(&root.0).unwrap();
+        let mut loader = DataLoader::new(&dataset, None, 1, false).unwrap();
+        assert!(loader.next().unwrap().is_err());
+        assert!(loader.next().is_none());
+        loader.reset().unwrap();
+        assert!(loader.next().unwrap().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_transform_configuration_at_construction() {
+        assert!(TransformPipeline::new(&TransformConfig {
+            resize: Some((0, 224)),
+            ..TransformConfig::default()
+        })
+        .is_err());
+        assert!(TransformPipeline::new(&TransformConfig {
+            normalize_mean: Some(vec![0.5]),
+            normalize_std: None,
+            ..TransformConfig::default()
+        })
+        .is_err());
+        assert!(TransformPipeline::new(&TransformConfig {
+            normalize_mean: Some(vec![0.5]),
+            normalize_std: Some(vec![0.0]),
+            ..TransformConfig::default()
+        })
+        .is_err());
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn loads_structured_hdf5_samples() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_data/train.h5");
+        let dataset = TensorDataset::from_hdf5_file(path, "positions").unwrap();
+        assert!(!dataset.is_empty());
+
+        let sample = dataset.get(0).unwrap();
+        assert_eq!(sample.shape().last(), Some(&3));
+        assert!(!sample.data().unwrap().is_empty());
     }
 }

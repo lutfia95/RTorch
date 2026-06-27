@@ -6,5 +6,9 @@ license.workspace = true
 links = "rtorch_ffi"
 build = "build.rs"
 
+[features]
+default = []
+hdf5 = []
+
 [build-dependencies]
 cmake = "0.1"

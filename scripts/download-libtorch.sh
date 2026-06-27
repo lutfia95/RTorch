@@ -89,6 +89,10 @@ libtorch_url() {
 }
 
 print_env() {
+  local loader_path_var="LD_LIBRARY_PATH"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    loader_path_var="DYLD_LIBRARY_PATH"
+  fi
   cat <<EOF
 
 LibTorch is installed at:
@@ -96,7 +100,7 @@ LibTorch is installed at:
 
 Use it with:
   export LIBTORCH="$LIBTORCH_DIR"
-  export LD_LIBRARY_PATH="\$LIBTORCH/lib:\${LD_LIBRARY_PATH:-}"
+  export $loader_path_var="\$LIBTORCH/lib:\${$loader_path_var:-}"
   cargo build
 EOF
 }

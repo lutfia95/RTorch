@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+hdf5 = ["rtorch-sys/hdf5"]
+
 [dependencies]
 half = "2"
 rtorch-sys = { path = "../rtorch-sys" }
