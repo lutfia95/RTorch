@@ -386,10 +386,14 @@ torch::Tensor read_hdf5_values(
     memory_space = Hdf5Handle(
         H5Screate_simple(static_cast<int>(read_dims.size()), read_dims.data(), nullptr),
         H5Sclose);
+    if (memory_space.id < 0) {
+      throw std::runtime_error("failed to create HDF5 memory dataspace");
+    }
   } else {
     memory_space = Hdf5Handle(H5S_ALL, nullptr);
   }
 
+  auto shape = hdf5_torch_shape(read_dims);
   auto count = hdf5_element_count(read_dims);
   std::vector<T> values(count);
   auto memory_id = sample.hdf5_has_slice ? memory_space.id : H5S_ALL;
@@ -398,7 +402,6 @@ torch::Tensor read_hdf5_values(
     throw std::runtime_error("failed to read HDF5 tensor data");
   }
 
-  auto shape = hdf5_torch_shape(read_dims);
   return torch::from_blob(
              values.data(),
              shape,
