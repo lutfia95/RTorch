@@ -14,8 +14,8 @@ Rust without starting Python at runtime.
 | RTorch feature | Python/PyTorch equivalent | Status |
 | --- | --- | --- |
 | `TensorDataset::from_class_folders(...)` | custom `torch.utils.data.Dataset` scanning class folders | Included |
-| `.pt` sample loading | `torch.load(path)` | Included |
-| `.h5` / `.hdf5` sample loading | `h5py.File(...)` plus tensor conversion | Included when HDF5 is available |
+| `.pt` single-tensor loading | `torch.load(path)` | Included for Python and LibTorch archives |
+| `.h5` / `.hdf5` sample loading | `h5py.File(...)` plus tensor conversion | Included with the `hdf5` feature |
 | `TensorDataset::len()` | `len(dataset)` | Included |
 | `TensorDataset::get(index)` | `dataset[index]` / `__getitem__` | Included |
 | `TensorDataset::class_names()` | `dataset.classes` / `ImageFolder.classes` | Included |
@@ -28,7 +28,7 @@ Rust without starting Python at runtime.
 | `resize` | `torch.nn.functional.interpolate(...)` | Included |
 | `center_crop` | center crop transform | Included |
 | `normalize` | `(x - mean) / std` | Included |
-| `Batch::data()` | tensor values copied to host data | Included as `&[f32]` |
+| `Batch::data()` | tensor values copied to host data | Lazy `Result<&[f32]>` view |
 | `Batch::tensor()` | batch tensor | Included |
 | `statistics(&[T])` | tensor reductions such as mean/std/min/max | Included |
 | `Tensor` autograd basics | `requires_grad`, `backward`, `grad` | Included |
@@ -117,14 +117,20 @@ export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 ```
 
+On macOS, use `DYLD_LIBRARY_PATH` instead:
+
+```bash
+export DYLD_LIBRARY_PATH="$LIBTORCH/lib:${DYLD_LIBRARY_PATH:-}"
+```
+
 `LIBTORCH` must point to the LibTorch root directory containing `include/` and
 `lib/`.
 
 ### Install HDF5
 
-HDF5 support is enabled automatically when CMake can find HDF5. The helper
-script installs HDF5 and `libaec` into `third_party/hdf5` using conda, mamba, or
-micromamba:
+HDF5 support is explicit and reproducible: enable the Cargo `hdf5` feature when
+building. The helper script installs HDF5 and `libaec` into
+`third_party/hdf5` using conda, mamba, or micromamba:
 
 ```bash
 bash scripts/download-hdf5.sh
@@ -144,6 +150,8 @@ export LIBTORCH="$PWD/third_party/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
 ```
 
+On macOS the generated file sets `DYLD_LIBRARY_PATH` instead.
+
 If you see:
 
 ```text
@@ -157,7 +165,8 @@ shared libraries at runtime. Run:
 source third_party/hdf5/rtorch-env.sh
 ```
 
-or manually add `third_party/hdf5/lib` to `LD_LIBRARY_PATH`.
+or manually add `third_party/hdf5/lib` to `LD_LIBRARY_PATH` on Linux or
+`DYLD_LIBRARY_PATH` on macOS.
 
 On Ubuntu you can also install HDF5 from the system package manager:
 
@@ -181,15 +190,15 @@ With LibTorch and local HDF5:
 
 ```bash
 source third_party/hdf5/rtorch-env.sh
-cargo build
-cargo test
+cargo build --features hdf5
+cargo test --features hdf5
 ```
 
 Run examples:
 
 ```bash
 cargo run -p rtorch --example statistics
-cargo run -p rtorch --example hdf5 -- test_data/train.h5 positions
+cargo run -p rtorch --features hdf5 --example hdf5 -- test_data/train.h5 positions
 cargo run -p rtorch --example tensor_folder
 ```
 
@@ -211,6 +220,11 @@ cargo run
 ```
 
 If you use HDF5:
+
+```toml
+[dependencies]
+rtorch = { path = "/path/to/RTorch/crates/rtorch", features = ["hdf5"] }
+```
 
 ```bash
 export HDF5_ROOT=/path/to/hdf5
@@ -241,7 +255,8 @@ Rules:
 - class names come from directory names
 - labels are assigned by sorted class directory order
 - `.pt`, `.h5`, and `.hdf5` files are discovered recursively
-- `.pt` files should contain a single tensor
+- `.pt` files must contain a single tensor; model checkpoints, dictionaries,
+  custom Python objects, and TorchScript modules are not tensor samples
 - image-like transforms expect `C x H x W`
 
 Example labels:
@@ -258,6 +273,8 @@ RTorch can load an HDF5 file directly:
 ```rust
 let dataset = TensorDataset::from_hdf5_file("test_data/train.h5", "positions")?;
 ```
+
+Build the consuming crate with the `hdf5` feature before using this API.
 
 For HDF5 files in class folders, RTorch looks for a numeric dataset named:
 
@@ -431,11 +448,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Rust | Python/PyTorch equivalent | Meaning |
 | --- | --- | --- |
-| `sample.data()` | `sample_tensor.flatten()` / NumPy view | Flat `&[f32]` sample data |
+| `sample.data()?` | `sample_tensor.float().cpu().flatten()` | Lazily materialized flat `&[f32]` data |
 | `sample.shape()` | `sample_tensor.shape` | Sample tensor shape |
 | `sample.label()` | label from `dataset[index]` | Sample label |
 | `sample.tensor()` | sample tensor | Owned LibTorch-backed tensor |
-| `batch.data()` | `batch_tensor.flatten()` | Flat `&[f32]` batch data |
+| `batch.data()?` | `batch_tensor.float().cpu().flatten()` | Lazily materialized flat `&[f32]` data |
 | `batch.shape()` | `batch_tensor.shape` | Batch tensor shape |
 | `batch.labels()` | batch labels tensor/list | Labels for each sample |
 | `batch.tensor()` | batch tensor | Owned LibTorch-backed tensor |
@@ -576,7 +593,10 @@ The current implementation is simple and correctness-first:
 - samples are loaded on demand
 - loading is synchronous
 - batches are stacked with LibTorch
-- batch data is copied to owned `Vec<f32>` storage for Rust slice access
+- HDF5 files and selected datasets stay open for the dataset lifetime
+- tensors keep their source dtype; CPU float32 data is materialized only when
+  `Sample::data()` or `Batch::data()` is called
+- statistics are computed and cached only when requested
 - no worker threads or prefetch queues are used yet
 
 For variable-length HDF5 structures, use `batch_size = 1` or group samples with

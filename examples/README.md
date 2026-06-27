@@ -8,9 +8,13 @@ Cargo:
 
 ```bash
 cargo run -p rtorch --example statistics
-cargo run -p rtorch --example hdf5 -- test_data/train.h5 positions
+cargo run -p rtorch --features hdf5 --example hdf5 -- test_data/train.h5 positions
 cargo run -p rtorch --example tensor_folder
 ```
+
+The HDF5 example requires the `hdf5` Cargo feature and an HDF5 development
+installation. Class-folder `.pt` examples accept files containing one tensor
+written by either Python `torch.save` or LibTorch C++ serialization.
 
 The files here are short reference snippets:
 
@@ -18,4 +22,3 @@ The files here are short reference snippets:
 | --- | --- | --- |
 | Class-folder `.pt` loader | `python/pt_class_folder_loader.py` | `rust/pt_class_folder_loader.rs` |
 | HDF5 structure loader | `python/hdf5_loader.py` | `rust/hdf5_loader.rs` |
-
