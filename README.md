@@ -197,10 +197,17 @@ cargo test --features hdf5
 Run examples:
 
 ```bash
+cargo run -p rtorch --example complete_example
+cargo run -p rtorch --example complete_example -- path/to/sample.pt
 cargo run -p rtorch --example statistics
 cargo run -p rtorch --features hdf5 --example hdf5 -- test_data/train.h5 positions
 cargo run -p rtorch --example tensor_folder
 ```
+
+The complete example lives at
+[`crates/rtorch/examples/complete_example.rs`](crates/rtorch/examples/complete_example.rs).
+It loads one `.pt` tensor file and walks through the dataset, loader,
+transform, tensor, autograd, scalar type, and statistics APIs.
 
 ## Add RTorch To Another Rust Project
 
