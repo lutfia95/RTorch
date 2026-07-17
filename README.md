@@ -59,16 +59,17 @@ README.md
 scripts/
   download-libtorch.sh
   download-hdf5.sh
-examples/
-  python/
-  rust/
 crates/
   rtorch/
     src/lib.rs
     examples/
+      README.md
+      complete_example.rs
       hdf5.rs
       statistics.rs
       tensor_folder.rs
+      python/
+      rust/
   rtorch-sys/
     build.rs
     src/lib.rs
@@ -262,9 +263,25 @@ Rules:
 - class names come from directory names
 - labels are assigned by sorted class directory order
 - `.pt`, `.h5`, and `.hdf5` files are discovered recursively
-- `.pt` files must contain a single tensor; model checkpoints, dictionaries,
-  custom Python objects, and TorchScript modules are not tensor samples
 - image-like transforms expect `C x H x W`
+
+Supported `.pt` tensor payloads:
+
+- LibTorch C++ serialized single tensor
+- Python `torch.save(tensor)`
+- Python `torch.save({"samples": tensor, ...})`
+- Python dictionaries with a tensor at one of these keys: `samples`, `data`,
+  `tensor`, `x`, `inputs`, or `features`
+- Python dictionaries with exactly one tensor value
+- single-element Python tuple/list containing a tensor
+
+Unsupported `.pt` payloads:
+
+- model checkpoints or `state_dict`s with many tensors unless one supported
+  tensor key is present
+- TorchScript/module archives
+- custom Python objects
+- files that do not contain a tensor payload
 
 Example labels:
 
@@ -293,6 +310,9 @@ For atomistic-style HDF5 files, if a `structures` dataset exists with `offset`
 and `length` fields, RTorch exposes each structure as one sample by slicing the
 selected numeric dataset along the first dimension.
 
+Unsupported HDF5 payloads include non-numeric datasets and files without a
+requested or default tensor dataset.
+
 For example, a file with:
 
 ```text
@@ -313,7 +333,8 @@ Use `batch_size = 1` unless all samples in a batch have matching shapes.
 
 ## Python To Rust Examples
 
-More side-by-side examples are in [`examples/`](examples/).
+More side-by-side examples are in
+[`crates/rtorch/examples/`](crates/rtorch/examples/).
 
 ### Class Folder `.pt`
 

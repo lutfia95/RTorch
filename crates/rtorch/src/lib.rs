@@ -980,6 +980,25 @@ mod tests {
     }
 
     #[test]
+    fn loads_python_torch_save_dict_samples_tensor() {
+        let root = TestDirectory::new("python-pt-dict");
+        let class_dir = root.0.join("example");
+        fs::create_dir(&class_dir).unwrap();
+        fs::write(
+            class_dir.join("sample.pt"),
+            decode_base64(include_str!("../../../test_data/python_samples_dict.pt.base64")),
+        )
+        .unwrap();
+
+        let dataset = TensorDataset::from_class_folders(&root.0).unwrap();
+        assert_eq!(dataset.len(), 1);
+
+        let sample = dataset.get(0).unwrap();
+        assert_eq!(sample.shape(), [2, 3]);
+        assert_eq!(sample.data().unwrap(), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
     fn loader_stops_after_a_sample_error_and_can_be_reset() {
         let root = TestDirectory::new("loader-error");
         let class_dir = root.0.join("broken");

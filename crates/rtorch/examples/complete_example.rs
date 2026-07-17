@@ -9,6 +9,8 @@ use rtorch::{
     TransformConfig, TransformPipeline,
 };
 
+const VALUE_PRINT_LIMIT: usize = 32;
+
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 struct TempDataset {
@@ -72,7 +74,7 @@ fn demonstrate_pt_dataset(root: &Path) -> Result<(), Box<dyn std::error::Error>>
     let sample = dataset.get(0)?;
     println!("sample.shape(): {:?}", sample.shape());
     println!("sample.label(): {}", sample.label());
-    println!("sample.data() as f32: {:?}", sample.data()?);
+    print_data_view("sample.data() as f32", sample.shape(), || sample.data())?;
     println!("sample.statistics(): {:?}", sample.statistics()?);
 
     let tensor_from_sample = sample.tensor()?;
@@ -96,10 +98,11 @@ fn demonstrate_pt_dataset(root: &Path) -> Result<(), Box<dyn std::error::Error>>
         "get_with_transform(...).shape(): {:?}",
         transformed_sample.shape()
     );
-    println!(
-        "get_with_transform(...).data() as f32: {:?}",
-        transformed_sample.data()?
-    );
+    print_data_view(
+        "get_with_transform(...).data() as f32",
+        transformed_sample.shape(),
+        || transformed_sample.data(),
+    )?;
 
     println!("\n== DataLoader ==");
     let mut loader = DataLoader::with_config(
@@ -117,7 +120,7 @@ fn demonstrate_pt_dataset(root: &Path) -> Result<(), Box<dyn std::error::Error>>
     if let Some(batch) = loader.next_batch()? {
         println!("next_batch().shape(): {:?}", batch.shape());
         println!("next_batch().labels(): {:?}", batch.labels());
-        println!("next_batch().data() as f32: {:?}", batch.data()?);
+        print_data_view("next_batch().data() as f32", batch.shape(), || batch.data())?;
         println!("next_batch().statistics(): {:?}", batch.statistics()?);
         print_tensor("next_batch().tensor()", &batch.tensor()?)?;
     }
@@ -241,15 +244,49 @@ fn demonstrate_statistics_types() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_tensor(name: &str, tensor: &Tensor) -> Result<(), Box<dyn std::error::Error>> {
+    let shape = tensor.shape()?;
+    let scalar_type = tensor.scalar_type()?;
+    let numel = tensor.numel();
+    let values = if numel <= VALUE_PRINT_LIMIT {
+        format!("{:?}", tensor.to_vec_f32()?)
+    } else {
+        format!("<omitted {numel} values; VALUE_PRINT_LIMIT={VALUE_PRINT_LIMIT}>")
+    };
+
     println!(
-        "{name}: shape={:?}, scalar_type={:?}, numel={}, requires_grad={}, values_as_f32={:?}",
-        tensor.shape()?,
-        tensor.scalar_type()?,
-        tensor.numel(),
+        "{name}: shape={:?}, scalar_type={:?}, numel={}, requires_grad={}, values_as_f32={}",
+        shape,
+        scalar_type,
+        numel,
         tensor.requires_grad(),
-        tensor.to_vec_f32()?
+        values
     );
     Ok(())
+}
+
+fn print_data_view<'a>(
+    name: &str,
+    shape: &[usize],
+    data: impl FnOnce() -> Result<&'a [f32], rtorch::Error>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match shape_numel(shape) {
+        Some(numel) if numel <= VALUE_PRINT_LIMIT => {
+            println!("{name}: {:?}", data()?);
+        }
+        Some(numel) => {
+            println!("{name}: <omitted {numel} values; VALUE_PRINT_LIMIT={VALUE_PRINT_LIMIT}>");
+        }
+        None => {
+            println!("{name}: <omitted; shape element count overflowed usize>");
+        }
+    }
+    Ok(())
+}
+
+fn shape_numel(shape: &[usize]) -> Option<usize> {
+    shape
+        .iter()
+        .try_fold(1_usize, |count, dimension| count.checked_mul(*dimension))
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

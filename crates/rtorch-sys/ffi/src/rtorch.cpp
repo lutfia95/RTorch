@@ -603,11 +603,66 @@ std::vector<char> read_file_bytes(const fs::path& path) {
 
 torch::Tensor load_python_pickled_tensor(const fs::path& path) {
   auto value = torch::pickle_load(read_file_bytes(path));
-  if (!value.isTensor()) {
-    throw std::runtime_error(
-        "Python torch.save file does not contain a single tensor");
+  if (value.isTensor()) {
+    return value.toTensor();
   }
-  return value.toTensor();
+
+  if (value.isGenericDict()) {
+    const auto dict = value.toGenericDict();
+    const std::vector<std::string> preferred_keys{
+        "samples",
+        "data",
+        "tensor",
+        "x",
+        "inputs",
+        "features",
+    };
+
+    for (const auto& key_name : preferred_keys) {
+      for (const auto& item : dict) {
+        const auto& key = item.key();
+        const auto& item_value = item.value();
+        if (key.isString() && key.toStringRef() == key_name &&
+            item_value.isTensor()) {
+          return item_value.toTensor();
+        }
+      }
+    }
+
+    std::optional<torch::Tensor> only_tensor;
+    size_t tensor_value_count = 0;
+    for (const auto& item : dict) {
+      if (item.value().isTensor()) {
+        only_tensor = item.value().toTensor();
+        ++tensor_value_count;
+      }
+    }
+    if (tensor_value_count == 1 && only_tensor.has_value()) {
+      return *only_tensor;
+    }
+
+    throw std::runtime_error(
+        "Python torch.save dict does not contain a supported tensor value; "
+        "expected a tensor at key 'samples', 'data', 'tensor', 'x', "
+        "'inputs', or 'features', or exactly one tensor value");
+  }
+
+  if (value.isTuple()) {
+    const auto& elements = value.toTuple()->elements();
+    if (elements.size() == 1 && elements[0].isTensor()) {
+      return elements[0].toTensor();
+    }
+  }
+
+  if (value.isList()) {
+    const auto elements = value.toList();
+    if (elements.size() == 1 && elements.get(0).isTensor()) {
+      return elements.get(0).toTensor();
+    }
+  }
+
+  throw std::runtime_error(
+      "Python torch.save file does not contain a supported tensor payload");
 }
 
 torch::Tensor load_tensor_from_sample(const SampleRecord& sample) {

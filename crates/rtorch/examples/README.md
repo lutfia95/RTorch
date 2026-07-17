@@ -1,10 +1,9 @@
 # RTorch Examples
 
-This folder shows Python/PyTorch-style dataset code beside equivalent RTorch
-Rust code.
+This folder contains the runnable RTorch examples and short Python/PyTorch-style
+dataset snippets beside equivalent RTorch Rust code.
 
-Runnable Rust examples live in `crates/rtorch/examples/` and can be launched with
-Cargo:
+Runnable Rust examples in this folder can be launched with Cargo:
 
 ```bash
 cargo run -p rtorch --example complete_example
@@ -15,10 +14,9 @@ cargo run -p rtorch --example tensor_folder
 ```
 
 The HDF5 example requires the `hdf5` Cargo feature and an HDF5 development
-installation. Class-folder `.pt` examples accept files containing one tensor
-written by either Python `torch.save` or LibTorch C++ serialization.
-The complete Rust walkthrough is
-[`crates/rtorch/examples/complete_example.rs`](../crates/rtorch/examples/complete_example.rs).
+installation. Class-folder `.pt` examples accept tensor payloads written by
+Python `torch.save` or LibTorch C++ serialization.
+The complete Rust walkthrough is [`complete_example.rs`](complete_example.rs).
 
 The files here are short reference snippets:
 
