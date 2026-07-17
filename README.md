@@ -97,7 +97,7 @@ You need:
 ### Install LibTorch
 
 The helper script downloads the Linux CPU LibTorch C++ package into
-`third_party/libtorch`:
+`scripts/libtorch`:
 
 ```bash
 bash scripts/download-libtorch.sh
@@ -112,7 +112,7 @@ LIBTORCH_VARIANT=cu128 bash scripts/download-libtorch.sh
 Use it with:
 
 ```bash
-export LIBTORCH="$PWD/third_party/libtorch"
+export LIBTORCH="$PWD/scripts/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 ```
@@ -130,7 +130,7 @@ export DYLD_LIBRARY_PATH="$LIBTORCH/lib:${DYLD_LIBRARY_PATH:-}"
 
 HDF5 support is explicit and reproducible: enable the Cargo `hdf5` feature when
 building. The helper script installs HDF5 and `libaec` into
-`third_party/hdf5` using conda, mamba, or micromamba:
+`scripts/hdf5` using conda, mamba, or micromamba:
 
 ```bash
 bash scripts/download-hdf5.sh
@@ -139,14 +139,14 @@ bash scripts/download-hdf5.sh
 Then source the generated environment file:
 
 ```bash
-source third_party/hdf5/rtorch-env.sh
+source scripts/hdf5/rtorch-env.sh
 ```
 
 That sets:
 
 ```bash
-export HDF5_ROOT="$PWD/third_party/hdf5"
-export LIBTORCH="$PWD/third_party/libtorch"
+export HDF5_ROOT="$PWD/scripts/hdf5"
+export LIBTORCH="$PWD/scripts/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
 ```
 
@@ -162,10 +162,10 @@ then the binary was built with HDF5, but the dynamic loader cannot find the HDF5
 shared libraries at runtime. Run:
 
 ```bash
-source third_party/hdf5/rtorch-env.sh
+source scripts/hdf5/rtorch-env.sh
 ```
 
-or manually add `third_party/hdf5/lib` to `LD_LIBRARY_PATH` on Linux or
+or manually add `scripts/hdf5/lib` to `LD_LIBRARY_PATH` on Linux or
 `DYLD_LIBRARY_PATH` on macOS.
 
 On Ubuntu you can also install HDF5 from the system package manager:
@@ -180,7 +180,7 @@ sudo apt-get install -y libhdf5-dev
 With LibTorch only:
 
 ```bash
-export LIBTORCH="$PWD/third_party/libtorch"
+export LIBTORCH="$PWD/scripts/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 cargo test
@@ -189,7 +189,7 @@ cargo test
 With LibTorch and local HDF5:
 
 ```bash
-source third_party/hdf5/rtorch-env.sh
+source scripts/hdf5/rtorch-env.sh
 cargo build --features hdf5
 cargo test --features hdf5
 ```
