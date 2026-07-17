@@ -97,7 +97,7 @@ You need:
 ### Install LibTorch
 
 The helper script downloads the Linux CPU LibTorch C++ package into
-`scripts/libtorch`:
+`third_party/libtorch`:
 
 ```bash
 bash scripts/download-libtorch.sh
@@ -112,7 +112,7 @@ LIBTORCH_VARIANT=cu128 bash scripts/download-libtorch.sh
 Use it with:
 
 ```bash
-export LIBTORCH="$PWD/scripts/libtorch"
+export LIBTORCH="$PWD/third_party/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 ```
@@ -130,7 +130,7 @@ export DYLD_LIBRARY_PATH="$LIBTORCH/lib:${DYLD_LIBRARY_PATH:-}"
 
 HDF5 support is explicit and reproducible: enable the Cargo `hdf5` feature when
 building. The helper script installs HDF5 and `libaec` into
-`scripts/hdf5` using conda, mamba, or micromamba:
+`third_party/hdf5` using conda, mamba, or micromamba:
 
 ```bash
 bash scripts/download-hdf5.sh
@@ -145,8 +145,8 @@ source scripts/hdf5/rtorch-env.sh
 That sets:
 
 ```bash
-export HDF5_ROOT="$PWD/scripts/hdf5"
-export LIBTORCH="$PWD/scripts/libtorch"
+export HDF5_ROOT="$PWD/third_party/hdf5"
+export LIBTORCH="$PWD/third_party/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
 ```
 
@@ -165,7 +165,7 @@ shared libraries at runtime. Run:
 source scripts/hdf5/rtorch-env.sh
 ```
 
-or manually add `scripts/hdf5/lib` to `LD_LIBRARY_PATH` on Linux or
+or manually add `third_party/hdf5/lib` to `LD_LIBRARY_PATH` on Linux or
 `DYLD_LIBRARY_PATH` on macOS.
 
 On Ubuntu you can also install HDF5 from the system package manager:
@@ -180,7 +180,7 @@ sudo apt-get install -y libhdf5-dev
 With LibTorch only:
 
 ```bash
-export LIBTORCH="$PWD/scripts/libtorch"
+export LIBTORCH="$PWD/third_party/libtorch"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 cargo build
 cargo test
