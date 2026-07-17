@@ -586,18 +586,4 @@ Common failure cases:
 - transform shape requirements are not met
 - `batch_size` is zero
 
-## Performance Notes
 
-The current implementation is simple and correctness-first:
-
-- samples are loaded on demand
-- loading is synchronous
-- batches are stacked with LibTorch
-- HDF5 files and selected datasets stay open for the dataset lifetime
-- tensors keep their source dtype; CPU float32 data is materialized only when
-  `Sample::data()` or `Batch::data()` is called
-- statistics are computed and cached only when requested
-- no worker threads or prefetch queues are used yet
-
-For variable-length HDF5 structures, use `batch_size = 1` or group samples with
-matching shapes before batching.
