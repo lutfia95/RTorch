@@ -986,7 +986,9 @@ mod tests {
         fs::create_dir(&class_dir).unwrap();
         fs::write(
             class_dir.join("sample.pt"),
-            decode_base64(include_str!("../../../test_data/python_samples_dict.pt.base64")),
+            decode_base64(include_str!(
+                "../../../test_data/python_samples_dict.pt.base64"
+            )),
         )
         .unwrap();
 
