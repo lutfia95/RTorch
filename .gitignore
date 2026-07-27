@@ -3,3 +3,4 @@
 /third_party/libtorch
 /third_party/hdf5
 .DS_Store
+/rtorch*.so

@@ -210,6 +210,74 @@ The complete example lives at
 It loads one `.pt` tensor file and walks through the dataset, loader,
 transform, tensor, autograd, scalar type, and statistics APIs.
 
+## Python Bindings
+
+RTorch also has an experimental PyO3/maturin extension crate in
+`crates/rtorch-python`. It exposes the generic tensor dataset and dataloader APIs
+to Python and converts RTorch tensors to `torch.Tensor` through DLPack.
+
+Build it from the repository root with LibTorch available. The root
+`pyproject.toml` points maturin at `crates/rtorch-python`:
+
+```bash
+export LIBTORCH=/path/to/libtorch
+export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
+python -m pip install maturin
+python -m maturin develop
+```
+
+For HDF5 support, also provide HDF5 and enable the feature:
+
+```bash
+export HDF5_ROOT=/path/to/hdf5
+export LD_LIBRARY_PATH="$LIBTORCH/lib:$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+python -m maturin develop --features hdf5
+```
+
+Generic tensor example:
+
+```python
+import rtorch
+
+loader = rtorch.DataLoader.from_hdf5_file(
+    "test_data/train.h5",
+    "positions",
+    batch_size=4,
+)
+for batch in loader:
+    tensor = batch.to_torch()
+    print(tensor.shape, batch.labels)
+```
+
+HDF5 graph example:
+
+```python
+import rtorch
+
+loader = rtorch.HDF5GraphLoader.from_hdf5_file(
+    "test_data/train.h5",
+    r_max=5.0,
+    atomic_numbers=[3, 8, 9, 11, 12, 13, 15, 17, 21, 22, 24, 25, 27, 28, 29, 31, 41, 44, 47, 79],
+    batch_size=2,
+)
+for data_list in loader:
+    graph_batch = data_list[0]
+    print(graph_batch.pos.shape, graph_batch.edge_index.shape)
+```
+
+The HDF5 graph loader returns the same outer shape as Equitrain's torch
+`DynamicGraphLoader`: each iteration yields a list of PyG `Batch` objects. Its
+HDF5 metadata reads, atom-type encoding, neighbor construction, graph tensor
+construction, shuffling, and dynamic packing run in Rust/PyO3. It requires the
+`hdf5` feature and Python packages `torch` and `torch-geometric`; `niggli_reduce`
+is not implemented in the RTorch path yet.
+
+After installing the extension with `maturin develop`, run the Python smoke test:
+
+```bash
+python -m unittest crates/rtorch-python/tests/test_import_dataloader.py
+```
+
 ## Add RTorch To Another Rust Project
 
 Until RTorch is published on crates.io, add it as a path dependency:
