@@ -1,4 +1,4 @@
-use std::ffi::{CString, NulError};
+use std::ffi::{c_void, CString, NulError};
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use std::path::Path;
@@ -312,6 +312,26 @@ impl Tensor {
         }
     }
 
+    pub fn to_vec_f64(&self) -> Result<Vec<f64>, Error> {
+        let mut values = vec![0.0_f64; self.numel()];
+        let ok = unsafe { sys::rt_tensor_copy_f64(self.raw, values.as_mut_ptr(), values.len()) };
+        if ok {
+            Ok(values)
+        } else {
+            Err(take_last_error())
+        }
+    }
+
+    pub fn to_vec_i64(&self) -> Result<Vec<i64>, Error> {
+        let mut values = vec![0_i64; self.numel()];
+        let ok = unsafe { sys::rt_tensor_copy_i64(self.raw, values.as_mut_ptr(), values.len()) };
+        if ok {
+            Ok(values)
+        } else {
+            Err(take_last_error())
+        }
+    }
+
     pub fn add(&self, other: &Self) -> Result<Self, Error> {
         Self::from_raw(unsafe { sys::rt_tensor_add(self.raw, other.raw) })
     }
@@ -348,12 +368,36 @@ impl Tensor {
     pub fn grad(&self) -> Result<Self, Error> {
         Self::from_raw(unsafe { sys::rt_tensor_grad(self.raw) })
     }
+
+    /// Exports this tensor as a DLPack `DLManagedTensor`.
+    ///
+    /// The returned pointer follows the DLPack ownership convention: exactly one
+    /// consumer must either pass it to a DLPack consumer or release it with
+    /// `free_dlpack_raw`.
+    pub fn to_dlpack_raw(&self) -> Result<*mut c_void, Error> {
+        let raw = unsafe { sys::rt_tensor_to_dlpack(self.raw) };
+        if raw.is_null() {
+            Err(take_last_error())
+        } else {
+            Ok(raw)
+        }
+    }
 }
 
 impl Drop for Tensor {
     fn drop(&mut self) {
         unsafe { sys::rt_tensor_free(self.raw) }
     }
+}
+
+/// Releases an unconsumed DLPack pointer returned by `Tensor::to_dlpack_raw`.
+///
+/// # Safety
+///
+/// `raw` must be a live `DLManagedTensor` pointer produced by RTorch and must
+/// not already have been consumed by another DLPack consumer.
+pub unsafe fn free_dlpack_raw(raw: *mut c_void) {
+    unsafe { sys::rt_dlpack_free(raw) }
 }
 
 /// Computes aggregate statistics with LibTorch over a supported Rust slice.
@@ -522,6 +566,82 @@ impl Drop for TensorDataset {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct HDF5GraphStructure {
+    pub offset: i64,
+    pub length: i32,
+    pub cell: [f64; 9],
+    pub pbc: [bool; 3],
+    pub energy: f64,
+    pub stress: [f64; 6],
+    pub virials: [f64; 9],
+    pub dipole: [f64; 3],
+    pub energy_weight: f32,
+    pub forces_weight: f32,
+    pub stress_weight: f32,
+    pub virials_weight: f32,
+    pub dipole_weight: f32,
+}
+
+impl From<sys::RtHdf5GraphStructure> for HDF5GraphStructure {
+    fn from(value: sys::RtHdf5GraphStructure) -> Self {
+        Self {
+            offset: value.offset,
+            length: value.length,
+            cell: value.cell,
+            pbc: [value.pbc[0] != 0, value.pbc[1] != 0, value.pbc[2] != 0],
+            energy: value.energy,
+            stress: value.stress,
+            virials: value.virials,
+            dipole: value.dipole,
+            energy_weight: value.energy_weight,
+            forces_weight: value.forces_weight,
+            stress_weight: value.stress_weight,
+            virials_weight: value.virials_weight,
+            dipole_weight: value.dipole_weight,
+        }
+    }
+}
+
+pub struct HDF5GraphMetadataDataset {
+    raw: *mut sys::RtHdf5GraphDataset,
+}
+
+impl HDF5GraphMetadataDataset {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path_to_cstring(path.as_ref())?;
+        let raw = unsafe { sys::rt_hdf5_graph_dataset_new(path.as_ptr()) };
+        if raw.is_null() {
+            return Err(take_last_error());
+        }
+        Ok(Self { raw })
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe { sys::rt_hdf5_graph_dataset_len(self.raw) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, index: usize) -> Result<HDF5GraphStructure, Error> {
+        let mut raw = sys::RtHdf5GraphStructure::default();
+        let ok = unsafe { sys::rt_hdf5_graph_dataset_get(self.raw, index, &mut raw) };
+        if ok {
+            Ok(raw.into())
+        } else {
+            Err(take_last_error())
+        }
+    }
+}
+
+impl Drop for HDF5GraphMetadataDataset {
+    fn drop(&mut self) {
+        unsafe { sys::rt_hdf5_graph_dataset_free(self.raw) }
+    }
+}
+
 fn owned_shape(raw: *mut sys::RtOwnedBatch) -> Result<Vec<usize>, Error> {
     let len = unsafe { sys::rt_owned_batch_shape_len(raw) };
     let ptr = unsafe { sys::rt_owned_batch_shape(raw) };
@@ -642,10 +762,10 @@ impl Batch {
     }
 }
 
-fn owned_data<'a>(
+fn owned_data(
     raw: *mut sys::RtOwnedBatch,
-    _owner: &'a *mut sys::RtOwnedBatch,
-) -> Result<&'a [f32], Error> {
+    _owner: &*mut sys::RtOwnedBatch,
+) -> Result<&[f32], Error> {
     let mut ptr = std::ptr::null();
     let mut len = 0;
     if !unsafe { sys::rt_owned_batch_data_view(raw, &mut ptr, &mut len) } {
@@ -787,6 +907,116 @@ impl Iterator for DataLoader<'_> {
 }
 
 impl Drop for DataLoader<'_> {
+    fn drop(&mut self) {
+        unsafe { sys::rt_data_loader_free(self.raw) }
+    }
+}
+
+pub struct OwnedDataLoader {
+    raw: *mut sys::RtDataLoader,
+    _dataset: TensorDataset,
+    _transforms: Option<TransformPipeline>,
+}
+
+impl OwnedDataLoader {
+    pub fn with_config(
+        dataset: TensorDataset,
+        transforms: Option<TransformPipeline>,
+        config: DataLoaderConfig,
+    ) -> Result<Self, Error> {
+        let raw = unsafe {
+            sys::rt_data_loader_new_with_options(
+                dataset.raw(),
+                transforms
+                    .as_ref()
+                    .map(|transform| transform.raw())
+                    .unwrap_or(std::ptr::null_mut()),
+                config.batch_size,
+                config.shuffle,
+                config.drop_last,
+            )
+        };
+
+        if raw.is_null() {
+            return Err(take_last_error());
+        }
+
+        Ok(Self {
+            raw,
+            _dataset: dataset,
+            _transforms: transforms,
+        })
+    }
+
+    pub fn from_dataset(
+        dataset: TensorDataset,
+        transforms: Option<TransformPipeline>,
+        batch_size: usize,
+        shuffle: bool,
+    ) -> Result<Self, Error> {
+        Self::with_config(
+            dataset,
+            transforms,
+            DataLoaderConfig {
+                batch_size,
+                shuffle,
+                drop_last: false,
+            },
+        )
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe { sys::rt_data_loader_len(self.raw) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn reset(&mut self) -> Result<(), Error> {
+        let ok = unsafe { sys::rt_data_loader_reset(self.raw) };
+        if ok {
+            Ok(())
+        } else {
+            Err(take_last_error())
+        }
+    }
+
+    pub fn next_batch(&mut self) -> Result<Option<Batch>, Error> {
+        let mut batch = std::ptr::null_mut();
+
+        let status = unsafe { sys::rt_data_loader_next(self.raw, &mut batch) };
+        match status {
+            sys::RT_STATUS_OK => {
+                if batch.is_null() {
+                    return Err(Error::Backend(
+                        "backend returned success without a batch".to_string(),
+                    ));
+                }
+                Ok(Some(Batch {
+                    shape: owned_shape(batch)?,
+                    raw: batch,
+                }))
+            }
+            sys::RT_STATUS_END => Ok(None),
+            _ => Err(take_last_error()),
+        }
+    }
+}
+
+impl Iterator for OwnedDataLoader {
+    type Item = Result<Batch, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_batch() {
+            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
+    }
+}
+
+impl Drop for OwnedDataLoader {
     fn drop(&mut self) {
         unsafe { sys::rt_data_loader_free(self.raw) }
     }

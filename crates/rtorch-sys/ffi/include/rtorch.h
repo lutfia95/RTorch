@@ -35,6 +35,7 @@ typedef struct RtTensorDataset RtTensorDataset;
 typedef struct RtDataLoader RtDataLoader;
 typedef struct RtOwnedBatch RtOwnedBatch;
 typedef struct RtTensor RtTensor;
+typedef struct RtHdf5GraphDataset RtHdf5GraphDataset;
 
 typedef struct RtStatistics {
   size_t count;
@@ -45,6 +46,22 @@ typedef struct RtStatistics {
   double min;
   double max;
 } RtStatistics;
+
+typedef struct RtHdf5GraphStructure {
+  int64_t offset;
+  int32_t length;
+  double cell[9];
+  uint8_t pbc[3];
+  double energy;
+  double stress[6];
+  double virials[9];
+  double dipole[3];
+  float energy_weight;
+  float forces_weight;
+  float stress_weight;
+  float virials_weight;
+  float dipole_weight;
+} RtHdf5GraphStructure;
 
 char* rt_last_error_message(void);
 void rt_last_error_free(char* message);
@@ -86,6 +103,14 @@ bool rt_tensor_copy_f32(
     const RtTensor* tensor,
     float* out,
     size_t out_len);
+bool rt_tensor_copy_f64(
+    const RtTensor* tensor,
+    double* out,
+    size_t out_len);
+bool rt_tensor_copy_i64(
+    const RtTensor* tensor,
+    int64_t* out,
+    size_t out_len);
 RtTensor* rt_tensor_add(const RtTensor* left, const RtTensor* right);
 RtTensor* rt_tensor_matmul(const RtTensor* left, const RtTensor* right);
 RtTensor* rt_tensor_reshape(
@@ -95,6 +120,8 @@ RtTensor* rt_tensor_reshape(
 RtTensor* rt_tensor_sum(const RtTensor* tensor);
 bool rt_tensor_backward(RtTensor* tensor);
 RtTensor* rt_tensor_grad(const RtTensor* tensor);
+void* rt_tensor_to_dlpack(const RtTensor* tensor);
+void rt_dlpack_free(void* dlpack);
 
 RtTransformPipeline* rt_transform_pipeline_new(
     bool to_float,
@@ -148,6 +175,14 @@ size_t rt_owned_batch_labels_len(const RtOwnedBatch* batch);
 bool rt_owned_batch_statistics(RtOwnedBatch* batch, RtStatistics* out);
 RtTensor* rt_owned_batch_tensor(const RtOwnedBatch* batch);
 void rt_owned_batch_free(RtOwnedBatch* batch);
+
+RtHdf5GraphDataset* rt_hdf5_graph_dataset_new(const char* path);
+void rt_hdf5_graph_dataset_free(RtHdf5GraphDataset* dataset);
+size_t rt_hdf5_graph_dataset_len(const RtHdf5GraphDataset* dataset);
+bool rt_hdf5_graph_dataset_get(
+    const RtHdf5GraphDataset* dataset,
+    size_t index,
+    RtHdf5GraphStructure* out);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,18 @@
+[package]
+name = "rtorch-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "rtorch"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+hdf5 = ["rtorch-core/hdf5"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+rtorch-core = { package = "rtorch", path = "../rtorch" }
