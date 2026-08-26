@@ -26,6 +26,45 @@ struct Neighborhood {
     cell: [f64; 9],
 }
 
+#[derive(Clone, Copy)]
+struct Translation {
+    unit: [i64; 3],
+    cartesian: [f64; 3],
+}
+
+#[derive(Clone, Copy)]
+struct ImageAtom {
+    receiver: usize,
+    translation: usize,
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+struct BinKey(i64, i64, i64);
+
+#[derive(Clone, Copy)]
+struct EdgeRecord {
+    sender: usize,
+    receiver: usize,
+    unit_shift: [i64; 3],
+    shift: [f64; 3],
+}
+
+struct PreparedNeighborhood {
+    positions: Vec<[f64; 3]>,
+    wrapped_positions: Vec<[f64; 3]>,
+    wrap_offsets: Vec<[i64; 3]>,
+    translations: Vec<Translation>,
+    cutoff: f64,
+    cutoff2: f64,
+    cell: [f64; 9],
+}
+
+// A spatial hash has higher setup cost than direct comparisons for tiny graphs.
+// Keep the reference algorithm for those cases and use the cell list once the
+// number of candidate pair/image checks becomes meaningful.
+const BRUTE_FORCE_CHECK_LIMIT: usize = 8_192;
+const MAX_EXPANDED_IMAGE_ATOMS: usize = 2_000_000;
+
 fn path_to_string(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
     let os = py.import_bound("os")?;
     os.getattr("fspath")?.call1((path,))?.extract::<String>()
@@ -53,7 +92,48 @@ fn cell_row(cell: &[f64; 9], index: usize) -> [f64; 3] {
     [cell[3 * index], cell[3 * index + 1], cell[3 * index + 2]]
 }
 
-fn translation_ranges(cutoff: f64, pbc: [bool; 3], cell: &[f64; 9]) -> [i32; 3] {
+fn inverse(cell: &[f64; 9]) -> Option<[f64; 9]> {
+    let det = determinant(cell);
+    if !det.is_finite() || det.abs() <= 1.0e-12 {
+        return None;
+    }
+
+    Some([
+        (cell[4] * cell[8] - cell[5] * cell[7]) / det,
+        (cell[2] * cell[7] - cell[1] * cell[8]) / det,
+        (cell[1] * cell[5] - cell[2] * cell[4]) / det,
+        (cell[5] * cell[6] - cell[3] * cell[8]) / det,
+        (cell[0] * cell[8] - cell[2] * cell[6]) / det,
+        (cell[2] * cell[3] - cell[0] * cell[5]) / det,
+        (cell[3] * cell[7] - cell[4] * cell[6]) / det,
+        (cell[1] * cell[6] - cell[0] * cell[7]) / det,
+        (cell[0] * cell[4] - cell[1] * cell[3]) / det,
+    ])
+}
+
+fn row_vector_matrix(vector: [f64; 3], matrix: &[f64; 9]) -> [f64; 3] {
+    [
+        vector[0] * matrix[0] + vector[1] * matrix[3] + vector[2] * matrix[6],
+        vector[0] * matrix[1] + vector[1] * matrix[4] + vector[2] * matrix[7],
+        vector[0] * matrix[2] + vector[1] * matrix[5] + vector[2] * matrix[8],
+    ]
+}
+
+fn lattice_shift(unit: [i64; 3], cell: &[f64; 9]) -> [f64; 3] {
+    [
+        unit[0] as f64 * cell[0]
+            + unit[1] as f64 * cell[3]
+            + unit[2] as f64 * cell[6],
+        unit[0] as f64 * cell[1]
+            + unit[1] as f64 * cell[4]
+            + unit[2] as f64 * cell[7],
+        unit[0] as f64 * cell[2]
+            + unit[1] as f64 * cell[5]
+            + unit[2] as f64 * cell[8],
+    ]
+}
+
+fn translation_ranges(cutoff: f64, pbc: [bool; 3], cell: &[f64; 9]) -> PyResult<[i32; 3]> {
     let volume = determinant(cell).abs();
     let rows = [cell_row(cell, 0), cell_row(cell, 1), cell_row(cell, 2)];
     let mut ranges = [0_i32; 3];
@@ -70,27 +150,64 @@ fn translation_ranges(cutoff: f64, pbc: [bool; 3], cell: &[f64; 9]) -> [i32; 3] 
         } else {
             vector_norm(rows[axis])
         };
-        ranges[axis] = if height > 1.0e-12 {
-            (cutoff / height).ceil() as i32 + 1
-        } else {
-            0
-        };
+        if !height.is_finite() || height <= 1.0e-12 {
+            return Err(PyValueError::new_err(
+                "periodic cell height must be finite and positive.",
+            ));
+        }
+        let range = (cutoff / height).ceil();
+        if range > f64::from(i32::MAX) {
+            return Err(PyValueError::new_err(
+                "periodic translation range exceeds the supported integer range.",
+            ));
+        }
+        ranges[axis] = range as i32;
     }
 
-    ranges
+    Ok(ranges)
 }
 
 fn get_neighborhood(
     positions: &[f64],
     cutoff: f64,
     pbc: [bool; 3],
-    mut cell: [f64; 9],
+    cell: [f64; 9],
 ) -> PyResult<Neighborhood> {
+    let prepared = prepare_neighborhood(positions, cutoff, pbc, cell)?;
+    let natoms = prepared.positions.len();
+    let direct_checks = natoms
+        .checked_mul(natoms)
+        .and_then(|value| value.checked_mul(prepared.translations.len()))
+        .unwrap_or(usize::MAX);
+
+    if direct_checks <= BRUTE_FORCE_CHECK_LIMIT {
+        get_neighborhood_brute_force(&prepared)
+    } else {
+        get_neighborhood_cell_list(&prepared)
+    }
+}
+
+fn prepare_neighborhood(
+    positions: &[f64],
+    cutoff: f64,
+    pbc: [bool; 3],
+    mut cell: [f64; 9],
+) -> PyResult<PreparedNeighborhood> {
     if positions.is_empty() || !positions.len().is_multiple_of(3) {
         return Err(PyValueError::new_err("positions must have shape [N, 3]."));
     }
-    if cutoff <= 0.0 {
-        return Err(PyValueError::new_err("r_max must be positive."));
+    if !cutoff.is_finite() || cutoff <= 0.0 {
+        return Err(PyValueError::new_err("r_max must be finite and positive."));
+    }
+    let cutoff2 = cutoff * cutoff;
+    if !cutoff2.is_finite() {
+        return Err(PyValueError::new_err("r_max is too large."));
+    }
+    if positions.iter().any(|value| !value.is_finite()) {
+        return Err(PyValueError::new_err("positions must contain finite values."));
+    }
+    if cell.iter().any(|value| !value.is_finite()) {
+        return Err(PyValueError::new_err("cell must contain finite values."));
     }
 
     if cell.iter().all(|value| *value == 0.0) {
@@ -119,51 +236,209 @@ fn get_neighborhood(
         cell[8] = extension;
     }
 
-    let ranges = translation_ranges(cutoff, pbc, &cell);
-    let cutoff2 = cutoff * cutoff;
+    if cell.iter().any(|value| !value.is_finite()) {
+        return Err(PyValueError::new_err(
+            "extended cell contains non-finite values.",
+        ));
+    }
+
     let natoms = positions.len() / 3;
-    let mut senders = Vec::new();
-    let mut receivers = Vec::new();
-    let mut shifts = Vec::new();
-    let mut unit_shifts = Vec::new();
+    let atom_positions = positions
+        .chunks_exact(3)
+        .map(|position| [position[0], position[1], position[2]])
+        .collect::<Vec<_>>();
+    let mut wrapped_positions = atom_positions.clone();
+    let mut wrap_offsets = vec![[0_i64; 3]; natoms];
 
+    if pbc.iter().any(|periodic| *periodic) {
+        let inverse_cell = inverse(&cell).ok_or_else(|| {
+            PyValueError::new_err("cell must be invertible when periodic boundaries are enabled.")
+        })?;
+
+        for atom in 0..natoms {
+            let fractional = row_vector_matrix(atom_positions[atom], &inverse_cell);
+            for axis in 0..3 {
+                if !pbc[axis] {
+                    continue;
+                }
+                let image = fractional[axis].floor();
+                if image < i64::MIN as f64 || image > i64::MAX as f64 {
+                    return Err(PyValueError::new_err(
+                        "periodic image offset exceeds the supported integer range.",
+                    ));
+                }
+                wrap_offsets[atom][axis] = image as i64;
+            }
+
+            let wrapping_shift = lattice_shift(wrap_offsets[atom], &cell);
+            for axis in 0..3 {
+                wrapped_positions[atom][axis] -= wrapping_shift[axis];
+            }
+        }
+    }
+
+    // Once periodic positions are wrapped into the primary cell, ceil(r/h)
+    // images along a lattice direction are sufficient, where h is the
+    // corresponding cell height. The previous unwrapped search needed an
+    // extra image and often expanded 3-D searches from 27 to 125 cells.
+    let ranges = translation_ranges(cutoff, pbc, &cell)?;
+    let translation_count = ranges.iter().try_fold(1_usize, |count, range| {
+        let width = 2_i64 * i64::from(*range) + 1;
+        usize::try_from(width)
+            .ok()
+            .and_then(|width| count.checked_mul(width))
+    });
+    let translation_count = translation_count.ok_or_else(|| {
+        PyValueError::new_err("periodic translation count exceeds the supported range.")
+    })?;
+    let mut translations = Vec::with_capacity(translation_count);
+    for sx in -ranges[0]..=ranges[0] {
+        for sy in -ranges[1]..=ranges[1] {
+            for sz in -ranges[2]..=ranges[2] {
+                let unit = [i64::from(sx), i64::from(sy), i64::from(sz)];
+                translations.push(Translation {
+                    unit,
+                    cartesian: lattice_shift(unit, &cell),
+                });
+            }
+        }
+    }
+
+    Ok(PreparedNeighborhood {
+        positions: atom_positions,
+        wrapped_positions,
+        wrap_offsets,
+        translations,
+        cutoff,
+        cutoff2,
+        cell,
+    })
+}
+
+fn edge_record(
+    prepared: &PreparedNeighborhood,
+    sender: usize,
+    receiver: usize,
+    translation: Translation,
+) -> PyResult<Option<EdgeRecord>> {
+    let mut unit_shift = [0_i64; 3];
+    for axis in 0..3 {
+        unit_shift[axis] = translation.unit[axis]
+            .checked_add(prepared.wrap_offsets[sender][axis])
+            .and_then(|value| value.checked_sub(prepared.wrap_offsets[receiver][axis]))
+            .ok_or_else(|| PyValueError::new_err("periodic image offset overflowed."))?;
+    }
+    if sender == receiver && unit_shift == [0, 0, 0] {
+        return Ok(None);
+    }
+
+    let displacement = [
+        prepared.wrapped_positions[receiver][0] - prepared.wrapped_positions[sender][0]
+            + translation.cartesian[0],
+        prepared.wrapped_positions[receiver][1] - prepared.wrapped_positions[sender][1]
+            + translation.cartesian[1],
+        prepared.wrapped_positions[receiver][2] - prepared.wrapped_positions[sender][2]
+            + translation.cartesian[2],
+    ];
+    let dist2 = displacement[0] * displacement[0]
+        + displacement[1] * displacement[1]
+        + displacement[2] * displacement[2];
+    if dist2 > prepared.cutoff2 {
+        return Ok(None);
+    }
+
+    let shift = lattice_shift(unit_shift, &prepared.cell);
+    if shift.iter().any(|value| !value.is_finite()) {
+        return Err(PyValueError::new_err(
+            "periodic Cartesian shift contains non-finite values.",
+        ));
+    }
+
+    Ok(Some(EdgeRecord {
+        sender,
+        receiver,
+        unit_shift,
+        shift,
+    }))
+}
+
+fn get_neighborhood_brute_force(prepared: &PreparedNeighborhood) -> PyResult<Neighborhood> {
+    let natoms = prepared.positions.len();
+    let mut records = Vec::new();
     for sender in 0..natoms {
-        let sender_pos = [
-            positions[3 * sender],
-            positions[3 * sender + 1],
-            positions[3 * sender + 2],
-        ];
         for receiver in 0..natoms {
-            let receiver_pos = [
-                positions[3 * receiver],
-                positions[3 * receiver + 1],
-                positions[3 * receiver + 2],
-            ];
-            for sx in -ranges[0]..=ranges[0] {
-                for sy in -ranges[1]..=ranges[1] {
-                    for sz in -ranges[2]..=ranges[2] {
-                        if sender == receiver && sx == 0 && sy == 0 && sz == 0 {
-                            continue;
-                        }
+            for translation in &prepared.translations {
+                if let Some(record) = edge_record(prepared, sender, receiver, *translation)? {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    Ok(records_to_neighborhood(records, prepared.cell))
+}
 
-                        let shift = [
-                            sx as f64 * cell[0] + sy as f64 * cell[3] + sz as f64 * cell[6],
-                            sx as f64 * cell[1] + sy as f64 * cell[4] + sz as f64 * cell[7],
-                            sx as f64 * cell[2] + sy as f64 * cell[5] + sz as f64 * cell[8],
-                        ];
-                        let displacement = [
-                            receiver_pos[0] - sender_pos[0] + shift[0],
-                            receiver_pos[1] - sender_pos[1] + shift[1],
-                            receiver_pos[2] - sender_pos[2] + shift[2],
-                        ];
-                        let dist2 = displacement[0] * displacement[0]
-                            + displacement[1] * displacement[1]
-                            + displacement[2] * displacement[2];
-                        if dist2 <= cutoff2 {
-                            senders.push(sender as i64);
-                            receivers.push(receiver as i64);
-                            shifts.extend_from_slice(&shift);
-                            unit_shifts.extend_from_slice(&[sx as f64, sy as f64, sz as f64]);
+fn bin_key(position: [f64; 3], inverse_bin_size: f64) -> BinKey {
+    BinKey(
+        (position[0] * inverse_bin_size).floor() as i64,
+        (position[1] * inverse_bin_size).floor() as i64,
+        (position[2] * inverse_bin_size).floor() as i64,
+    )
+}
+
+fn get_neighborhood_cell_list(prepared: &PreparedNeighborhood) -> PyResult<Neighborhood> {
+    let expanded_atoms = prepared
+        .positions
+        .len()
+        .checked_mul(prepared.translations.len())
+        .unwrap_or(usize::MAX);
+    if expanded_atoms > MAX_EXPANDED_IMAGE_ATOMS {
+        return get_neighborhood_translation_queries(prepared);
+    }
+
+    let natoms = prepared.positions.len();
+    let inverse_bin_size = prepared.cutoff.recip();
+    let mut bins: HashMap<BinKey, Vec<ImageAtom>> = HashMap::new();
+
+    for receiver in 0..natoms {
+        for (translation_index, translation) in prepared.translations.iter().enumerate() {
+            let image_position = [
+                prepared.wrapped_positions[receiver][0] + translation.cartesian[0],
+                prepared.wrapped_positions[receiver][1] + translation.cartesian[1],
+                prepared.wrapped_positions[receiver][2] + translation.cartesian[2],
+            ];
+            bins.entry(bin_key(image_position, inverse_bin_size))
+                .or_default()
+                .push(ImageAtom {
+                    receiver,
+                    translation: translation_index,
+                });
+        }
+    }
+
+    let mut records = Vec::new();
+    for sender in 0..natoms {
+        let sender_bin = bin_key(prepared.wrapped_positions[sender], inverse_bin_size);
+        for dx in -1_i64..=1 {
+            let Some(bin_x) = sender_bin.0.checked_add(dx) else {
+                continue;
+            };
+            for dy in -1_i64..=1 {
+                let Some(bin_y) = sender_bin.1.checked_add(dy) else {
+                    continue;
+                };
+                for dz in -1_i64..=1 {
+                    let Some(bin_z) = sender_bin.2.checked_add(dz) else {
+                        continue;
+                    };
+                    let Some(images) = bins.get(&BinKey(bin_x, bin_y, bin_z)) else {
+                        continue;
+                    };
+                    for image in images {
+                        let translation = prepared.translations[image.translation];
+                        if let Some(record) =
+                            edge_record(prepared, sender, image.receiver, translation)?
+                        {
+                            records.push(record);
                         }
                     }
                 }
@@ -171,16 +446,85 @@ fn get_neighborhood(
         }
     }
 
-    let mut edge_index = Vec::with_capacity(senders.len() + receivers.len());
-    edge_index.extend_from_slice(&senders);
-    edge_index.extend_from_slice(&receivers);
+    Ok(records_to_neighborhood(records, prepared.cell))
+}
 
-    Ok(Neighborhood {
+fn get_neighborhood_translation_queries(prepared: &PreparedNeighborhood) -> PyResult<Neighborhood> {
+    let natoms = prepared.positions.len();
+    let inverse_bin_size = prepared.cutoff.recip();
+    let mut bins: HashMap<BinKey, Vec<usize>> = HashMap::new();
+    for receiver in 0..natoms {
+        bins.entry(bin_key(
+            prepared.wrapped_positions[receiver],
+            inverse_bin_size,
+        ))
+        .or_default()
+        .push(receiver);
+    }
+
+    let mut records = Vec::new();
+    for sender in 0..natoms {
+        for translation in &prepared.translations {
+            // receiver + translation must be close to sender, so query the
+            // unexpanded receiver bins around sender - translation.
+            let query_position = [
+                prepared.wrapped_positions[sender][0] - translation.cartesian[0],
+                prepared.wrapped_positions[sender][1] - translation.cartesian[1],
+                prepared.wrapped_positions[sender][2] - translation.cartesian[2],
+            ];
+            let query_bin = bin_key(query_position, inverse_bin_size);
+            for dx in -1_i64..=1 {
+                let Some(bin_x) = query_bin.0.checked_add(dx) else {
+                    continue;
+                };
+                for dy in -1_i64..=1 {
+                    let Some(bin_y) = query_bin.1.checked_add(dy) else {
+                        continue;
+                    };
+                    for dz in -1_i64..=1 {
+                        let Some(bin_z) = query_bin.2.checked_add(dz) else {
+                            continue;
+                        };
+                        let Some(receivers) = bins.get(&BinKey(bin_x, bin_y, bin_z)) else {
+                            continue;
+                        };
+                        for receiver in receivers {
+                            if let Some(record) =
+                                edge_record(prepared, sender, *receiver, *translation)?
+                            {
+                                records.push(record);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(records_to_neighborhood(records, prepared.cell))
+}
+
+fn records_to_neighborhood(records: Vec<EdgeRecord>, cell: [f64; 9]) -> Neighborhood {
+    // Every search iterates senders in ascending order, matching Matscipy's
+    // ordering guarantee. It deliberately does not sort receivers: sorting is
+    // not part of that contract and adds O(E log E) work to every structure.
+    let mut edge_index = Vec::with_capacity(2 * records.len());
+    edge_index.extend(records.iter().map(|record| record.sender as i64));
+    edge_index.extend(records.iter().map(|record| record.receiver as i64));
+
+    let mut shifts = Vec::with_capacity(3 * records.len());
+    let mut unit_shifts = Vec::with_capacity(3 * records.len());
+    for record in records {
+        shifts.extend_from_slice(&record.shift);
+        unit_shifts.extend(record.unit_shift.map(|value| value as f64));
+    }
+
+    Neighborhood {
         edge_index,
         shifts,
         unit_shifts,
         cell,
-    })
+    }
 }
 
 fn voigt_to_matrix(stress: [f64; 6]) -> [f64; 9] {
@@ -372,7 +716,12 @@ impl PyHDF5GraphDataset {
             node_attrs[atom_index * self.atomic_numbers.len() + species_index] = 1.0;
         }
 
-        let neighborhood = get_neighborhood(&positions_values, self.r_max, entry.pbc, entry.cell)?;
+        let r_max = self.r_max;
+        let pbc = entry.pbc;
+        let input_cell = entry.cell;
+        let neighborhood = py.allow_threads(move || {
+            get_neighborhood(&positions_values, r_max, pbc, input_cell)
+        })?;
         let edge_count = neighborhood.edge_index.len() / 2;
         let stress = voigt_to_matrix(entry.stress);
         let pbc_values = entry.pbc;
@@ -815,4 +1164,159 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHDF5GraphDatasetCollection>()?;
     module.add_class::<PyHDF5GraphLoader>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalized_edges(neighborhood: &Neighborhood) -> Vec<(i64, i64, i64, i64, i64)> {
+        let edge_count = neighborhood.edge_index.len() / 2;
+        let mut edges = (0..edge_count)
+            .map(|edge| {
+                (
+                    neighborhood.edge_index[edge],
+                    neighborhood.edge_index[edge_count + edge],
+                    neighborhood.unit_shifts[3 * edge] as i64,
+                    neighborhood.unit_shifts[3 * edge + 1] as i64,
+                    neighborhood.unit_shifts[3 * edge + 2] as i64,
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort_unstable();
+        edges
+    }
+
+    fn assert_same_neighborhood(left: &Neighborhood, right: &Neighborhood) {
+        assert_eq!(left.cell, right.cell);
+        assert_eq!(normalized_edges(left), normalized_edges(right));
+
+        for neighborhood in [left, right] {
+            for (unit, shift) in neighborhood
+                .unit_shifts
+                .chunks_exact(3)
+                .zip(neighborhood.shifts.chunks_exact(3))
+            {
+                let expected = lattice_shift(
+                    [unit[0] as i64, unit[1] as i64, unit[2] as i64],
+                    &neighborhood.cell,
+                );
+                for axis in 0..3 {
+                    assert!((expected[axis] - shift[axis]).abs() <= 1.0e-12);
+                }
+            }
+        }
+    }
+
+    fn assert_cell_list_matches_brute_force(prepared: &PreparedNeighborhood) {
+        let cell_list = get_neighborhood_cell_list(prepared).unwrap();
+        let translation_queries = get_neighborhood_translation_queries(prepared).unwrap();
+        let brute_force = get_neighborhood_brute_force(prepared).unwrap();
+        assert_same_neighborhood(&cell_list, &brute_force);
+        assert_same_neighborhood(&translation_queries, &brute_force);
+    }
+
+    fn next_random(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((*state >> 11) as f64) / ((1_u64 << 53) as f64)
+    }
+
+    fn fractional_to_cartesian(fractional: [f64; 3], cell: &[f64; 9]) -> [f64; 3] {
+        [
+            fractional[0] * cell[0]
+                + fractional[1] * cell[3]
+                + fractional[2] * cell[6],
+            fractional[0] * cell[1]
+                + fractional[1] * cell[4]
+                + fractional[2] * cell[7],
+            fractional[0] * cell[2]
+                + fractional[1] * cell[5]
+                + fractional[2] * cell[8],
+        ]
+    }
+
+    #[test]
+    fn cell_list_matches_brute_force_without_periodic_boundaries() {
+        let mut state = 0x5eed_u64;
+        let mut positions = Vec::new();
+        for _ in 0..128 {
+            positions.extend([
+                12.0 * next_random(&mut state) - 6.0,
+                12.0 * next_random(&mut state) - 6.0,
+                12.0 * next_random(&mut state) - 6.0,
+            ]);
+        }
+
+        let prepared = prepare_neighborhood(&positions, 1.25, [false; 3], [0.0; 9]).unwrap();
+        assert_cell_list_matches_brute_force(&prepared);
+    }
+
+    #[test]
+    fn cell_list_matches_brute_force_for_triclinic_periodic_cell() {
+        let cell = [4.0, 0.0, 0.0, 0.7, 3.8, 0.0, 0.2, 0.4, 4.2];
+        let mut state = 0xc0ffee_u64;
+        let mut positions = Vec::new();
+        for _ in 0..48 {
+            // Include atoms several cells outside the primary periodic box.
+            let fractional = [
+                4.0 * next_random(&mut state) - 1.5,
+                4.0 * next_random(&mut state) - 1.5,
+                4.0 * next_random(&mut state) - 1.5,
+            ];
+            positions.extend(fractional_to_cartesian(fractional, &cell));
+        }
+
+        let prepared = prepare_neighborhood(&positions, 1.3, [true; 3], cell).unwrap();
+        assert_eq!(prepared.translations.len(), 27);
+        assert_cell_list_matches_brute_force(&prepared);
+    }
+
+    #[test]
+    fn periodic_shifts_are_relative_to_original_out_of_cell_positions() {
+        let positions = [0.1, 0.0, 0.0, 3.9, 0.0, 0.0];
+        let cell = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0];
+        let neighborhood = get_neighborhood(&positions, 0.3, [true, false, false], cell).unwrap();
+
+        assert_eq!(
+            normalized_edges(&neighborhood),
+            [(0, 1, -2, 0, 0), (1, 0, 2, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn periodic_self_images_within_cutoff_are_retained() {
+        let positions = [0.0, 0.0, 0.0];
+        let cell = [1.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0];
+        let neighborhood = get_neighborhood(&positions, 2.1, [true, false, false], cell).unwrap();
+
+        assert_eq!(
+            normalized_edges(&neighborhood),
+            [
+                (0, 0, -2, 0, 0),
+                (0, 0, -1, 0, 0),
+                (0, 0, 1, 0, 0),
+                (0, 0, 2, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn adaptive_search_is_deterministic_and_matches_reference_edges() {
+        let mut positions = Vec::new();
+        for x in 0..12 {
+            for y in 0..12 {
+                positions.extend([x as f64 * 0.8, y as f64 * 0.8, 0.0]);
+            }
+        }
+        let prepared = prepare_neighborhood(&positions, 0.9, [false; 3], [0.0; 9]).unwrap();
+        let adaptive = get_neighborhood(&positions, 0.9, [false; 3], [0.0; 9]).unwrap();
+        let adaptive_again = get_neighborhood(&positions, 0.9, [false; 3], [0.0; 9]).unwrap();
+        let reference = get_neighborhood_brute_force(&prepared).unwrap();
+        assert_same_neighborhood(&adaptive, &reference);
+        assert_eq!(adaptive.edge_index, adaptive_again.edge_index);
+        assert_eq!(adaptive.unit_shifts, adaptive_again.unit_shifts);
+        assert_eq!(adaptive.shifts, adaptive_again.shifts);
+    }
 }

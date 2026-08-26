@@ -278,6 +278,17 @@ After installing the extension with `maturin develop`, run the Python smoke test
 python -m unittest crates/rtorch-python/tests/test_import_dataloader.py
 ```
 
+To verify neighbor parity against Equitrain/Matscipy and measure end-to-end
+HDF5 graph-construction throughput on representative data:
+
+```bash
+python crates/rtorch/examples/python/equitrain_graph_benchmark.py \
+  path/to/train.h5 --r-max 5.0 --verify
+```
+
+The benchmark alternates implementation order across repeated passes and reports
+the median structures per second and RTorch speedup.
+
 ## Add RTorch To Another Rust Project
 
 Until RTorch is published on crates.io, add it as a path dependency:
@@ -681,5 +692,4 @@ Common failure cases:
 - tensor shapes in a batch are incompatible
 - transform shape requirements are not met
 - `batch_size` is zero
-
 
