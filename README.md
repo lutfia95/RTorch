@@ -287,7 +287,9 @@ python crates/rtorch/examples/python/equitrain_graph_benchmark.py \
 ```
 
 The benchmark alternates implementation order across repeated passes and reports
-the median structures per second and RTorch speedup.
+runtime, structures per second, full-process peak RSS, peak RSS growth, and the
+median RTorch speedup. RSS is sampled every 10 ms by default; use
+`--memory-sample-ms` to change the interval.
 
 ## Add RTorch To Another Rust Project
 
@@ -692,4 +694,3 @@ Common failure cases:
 - tensor shapes in a batch are incompatible
 - transform shape requirements are not met
 - `batch_size` is zero
-
