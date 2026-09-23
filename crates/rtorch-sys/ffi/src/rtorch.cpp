@@ -1770,6 +1770,7 @@ extern "C" bool rt_hdf5_graph_dataset_get(
 #ifndef RTORCH_WITH_HDF5
     throw std::runtime_error(
         "RTorch was built without HDF5 graph dataset support");
+    return false;
 #else
     if (index >= dataset->length) {
       throw std::runtime_error("HDF5 graph structure index out of range");
