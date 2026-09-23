@@ -121,15 +121,9 @@ fn row_vector_matrix(vector: [f64; 3], matrix: &[f64; 9]) -> [f64; 3] {
 
 fn lattice_shift(unit: [i64; 3], cell: &[f64; 9]) -> [f64; 3] {
     [
-        unit[0] as f64 * cell[0]
-            + unit[1] as f64 * cell[3]
-            + unit[2] as f64 * cell[6],
-        unit[0] as f64 * cell[1]
-            + unit[1] as f64 * cell[4]
-            + unit[2] as f64 * cell[7],
-        unit[0] as f64 * cell[2]
-            + unit[1] as f64 * cell[5]
-            + unit[2] as f64 * cell[8],
+        unit[0] as f64 * cell[0] + unit[1] as f64 * cell[3] + unit[2] as f64 * cell[6],
+        unit[0] as f64 * cell[1] + unit[1] as f64 * cell[4] + unit[2] as f64 * cell[7],
+        unit[0] as f64 * cell[2] + unit[1] as f64 * cell[5] + unit[2] as f64 * cell[8],
     ]
 }
 
@@ -204,7 +198,9 @@ fn prepare_neighborhood(
         return Err(PyValueError::new_err("r_max is too large."));
     }
     if positions.iter().any(|value| !value.is_finite()) {
-        return Err(PyValueError::new_err("positions must contain finite values."));
+        return Err(PyValueError::new_err(
+            "positions must contain finite values.",
+        ));
     }
     if cell.iter().any(|value| !value.is_finite()) {
         return Err(PyValueError::new_err("cell must contain finite values."));
@@ -719,9 +715,8 @@ impl PyHDF5GraphDataset {
         let r_max = self.r_max;
         let pbc = entry.pbc;
         let input_cell = entry.cell;
-        let neighborhood = py.allow_threads(move || {
-            get_neighborhood(&positions_values, r_max, pbc, input_cell)
-        })?;
+        let neighborhood =
+            py.allow_threads(move || get_neighborhood(&positions_values, r_max, pbc, input_cell))?;
         let edge_count = neighborhood.edge_index.len() / 2;
         let stress = voigt_to_matrix(entry.stress);
         let pbc_values = entry.pbc;
@@ -1225,15 +1220,9 @@ mod tests {
 
     fn fractional_to_cartesian(fractional: [f64; 3], cell: &[f64; 9]) -> [f64; 3] {
         [
-            fractional[0] * cell[0]
-                + fractional[1] * cell[3]
-                + fractional[2] * cell[6],
-            fractional[0] * cell[1]
-                + fractional[1] * cell[4]
-                + fractional[2] * cell[7],
-            fractional[0] * cell[2]
-                + fractional[1] * cell[5]
-                + fractional[2] * cell[8],
+            fractional[0] * cell[0] + fractional[1] * cell[3] + fractional[2] * cell[6],
+            fractional[0] * cell[1] + fractional[1] * cell[4] + fractional[2] * cell[7],
+            fractional[0] * cell[2] + fractional[1] * cell[5] + fractional[2] * cell[8],
         ]
     }
 
