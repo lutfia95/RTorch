@@ -15,6 +15,9 @@ fn main() {
     let mut cmake = cmake::Config::new("ffi");
     cmake
         .define("CMAKE_PREFIX_PATH", &libtorch_path)
+        // CMake caches Torch_DIR. Override it explicitly so changing LIBTORCH
+        // cannot silently keep headers and ABI flags from an earlier build.
+        .define("Torch_DIR", libtorch_path.join("share/cmake/Torch"))
         .define("CMAKE_CXX_STANDARD", "17");
     let hdf5_enabled = env::var_os("CARGO_FEATURE_HDF5").is_some();
     cmake.define(

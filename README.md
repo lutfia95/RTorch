@@ -291,6 +291,51 @@ runtime, structures per second, full-process peak RSS, peak RSS growth, and the
 median RTorch speedup. RSS is sampled every 10 ms by default; use
 `--memory-sample-ms` to change the interval.
 
+For independent runtime and detailed memory profiles, run the two root-level
+benchmarks in separate processes with exactly the same arguments:
+
+```bash
+python rtorch_test.py path/to/train.h5 --r-max 5.0 --batch-size 2 \
+  --repeats 5 --json rtorch-results.json
+python python_loader_test.py path/to/train.h5 --r-max 5.0 --batch-size 2 \
+  --repeats 5 --json python-results.json
+```
+
+Both scripts report wall and CPU time, structures/nodes/edges processed, sampled
+RSS/PSS/USS/shared/swap memory, page faults, I/O blocks, context switches, and a
+separate Python-heap profiling pass. The heap pass uses `tracemalloc` and is
+excluded from the runtime summary. Use `--skip-python-heap` to omit it and
+`--max-batches` for a short trial. The Python benchmark uses the local
+`equitrain/` checkout when present; install its requirements with:
+
+```bash
+python -m pip install -e './equitrain[torch]'
+```
+
+### PyTorch/LibTorch symbol errors
+
+The RTorch extension and the PyTorch imported by Python must use the same
+PyTorch version, CUDA/CPU variant, and C++ ABI. Mixing packages can produce an
+error such as:
+
+```text
+ImportError: .../libc10_cuda.so: undefined symbol: ...torchCheckFail...
+```
+
+For the Python extension, build against the active Python `torch` package rather
+than placing an unrelated standalone LibTorch first in `LD_LIBRARY_PATH`:
+
+```bash
+export LIBTORCH="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent)')"
+export HDF5_ROOT="$PWD/third_party/hdf5"
+export LD_LIBRARY_PATH="$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+python -m maturin develop --features hdf5
+```
+
+Importing `torch` before `rtorch` is still recommended. Do not add
+`third_party/libtorch/lib` to `LD_LIBRARY_PATH` for this Python build; doing so
+can replace PyTorch's own `libc10.so` at runtime with an incompatible copy.
+
 ## Add RTorch To Another Rust Project
 
 Until RTorch is published on crates.io, add it as a path dependency:
