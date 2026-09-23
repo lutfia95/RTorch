@@ -35,12 +35,12 @@ enum class SampleFormat {
 };
 
 struct Hdf5DatasetState;
+struct DirectHdf5Dataset;
 
 struct SampleRecord {
   fs::path path;
   int64_t label;
   SampleFormat format = SampleFormat::TorchFile;
-  std::string hdf5_dataset;
   std::shared_ptr<Hdf5DatasetState> hdf5_state;
   uint64_t hdf5_offset = 0;
   uint64_t hdf5_length = 0;
@@ -120,7 +120,11 @@ struct TransformPipelineImpl {
 struct TensorDatasetImpl {
   std::vector<SampleRecord> samples;
   std::vector<std::string> class_names;
+  std::shared_ptr<DirectHdf5Dataset> direct_hdf5;
 };
+
+size_t tensor_dataset_size(const TensorDatasetImpl& dataset);
+SampleRecord tensor_dataset_sample(const TensorDatasetImpl& dataset, size_t index);
 
 struct BatchStorage {
   torch::Tensor tensor;
@@ -145,7 +149,7 @@ struct DataLoaderImpl {
       return 0;
     }
     const auto sample_count = indices.empty() && dataset != nullptr
-        ? dataset->samples.size()
+        ? tensor_dataset_size(*dataset)
         : indices.size();
     if (drop_last) {
       return sample_count / batch_size;
@@ -154,7 +158,7 @@ struct DataLoaderImpl {
   }
 
   void reset() {
-    indices.resize(dataset->samples.size());
+    indices.resize(tensor_dataset_size(*dataset));
     for (size_t i = 0; i < indices.size(); ++i) {
       indices[i] = i;
     }
@@ -243,22 +247,6 @@ struct Hdf5StructureSpan {
   int32_t length;
 };
 
-struct Hdf5GraphStructureRaw {
-  int64_t offset;
-  int32_t length;
-  double cell[9];
-  hbool_t pbc[3];
-  double energy;
-  double stress[6];
-  double virials[9];
-  double dipole[3];
-  float energy_weight;
-  float forces_weight;
-  float stress_weight;
-  float virials_weight;
-  float dipole_weight;
-};
-
 bool hdf5_dataset_exists(hid_t file, const std::string& dataset_name) {
   return H5Lexists(file, dataset_name.c_str(), H5P_DEFAULT) > 0;
 }
@@ -345,28 +333,14 @@ Hdf5Handle hdf5_array_type(hid_t base_type, std::initializer_list<hsize_t> dims)
       H5Tclose);
 }
 
-std::vector<RtHdf5GraphStructure> read_hdf5_graph_structures(hid_t file) {
-  if (!hdf5_dataset_exists(file, "structures")) {
-    throw std::runtime_error("HDF5 file does not contain an graph structures dataset");
-  }
-
-  Hdf5Handle dataset(H5Dopen2(file, "structures", H5P_DEFAULT), H5Dclose);
-  if (dataset.id < 0) {
-    throw std::runtime_error("failed to open HDF5 structures dataset");
-  }
-
-  auto dims = hdf5_dataset_dims(dataset);
-  if (dims.size() != 1) {
-    throw std::runtime_error("HDF5 structures dataset must be one-dimensional");
-  }
-
+Hdf5Handle make_hdf5_graph_memory_type() {
   auto cell_type = hdf5_array_type(H5T_NATIVE_DOUBLE, {3, 3});
   auto pbc_type = hdf5_array_type(H5T_NATIVE_HBOOL, {3});
   auto stress_type = hdf5_array_type(H5T_NATIVE_DOUBLE, {6});
   auto virials_type = hdf5_array_type(H5T_NATIVE_DOUBLE, {3, 3});
   auto dipole_type = hdf5_array_type(H5T_NATIVE_DOUBLE, {3});
   Hdf5Handle memory_type(
-      H5Tcreate(H5T_COMPOUND, sizeof(Hdf5GraphStructureRaw)),
+      H5Tcreate(H5T_COMPOUND, sizeof(RtHdf5GraphStructure)),
       H5Tclose);
   if (memory_type.id < 0 ||
       cell_type.id < 0 ||
@@ -374,49 +348,22 @@ std::vector<RtHdf5GraphStructure> read_hdf5_graph_structures(hid_t file) {
       stress_type.id < 0 ||
       virials_type.id < 0 ||
       dipole_type.id < 0 ||
-      H5Tinsert(memory_type, "offset", HOFFSET(Hdf5GraphStructureRaw, offset), H5T_NATIVE_LLONG) < 0 ||
-      H5Tinsert(memory_type, "length", HOFFSET(Hdf5GraphStructureRaw, length), H5T_NATIVE_INT) < 0 ||
-      H5Tinsert(memory_type, "cell", HOFFSET(Hdf5GraphStructureRaw, cell), cell_type) < 0 ||
-      H5Tinsert(memory_type, "pbc", HOFFSET(Hdf5GraphStructureRaw, pbc), pbc_type) < 0 ||
-      H5Tinsert(memory_type, "energy", HOFFSET(Hdf5GraphStructureRaw, energy), H5T_NATIVE_DOUBLE) < 0 ||
-      H5Tinsert(memory_type, "stress", HOFFSET(Hdf5GraphStructureRaw, stress), stress_type) < 0 ||
-      H5Tinsert(memory_type, "virials", HOFFSET(Hdf5GraphStructureRaw, virials), virials_type) < 0 ||
-      H5Tinsert(memory_type, "dipole", HOFFSET(Hdf5GraphStructureRaw, dipole), dipole_type) < 0 ||
-      H5Tinsert(memory_type, "energy_weight", HOFFSET(Hdf5GraphStructureRaw, energy_weight), H5T_NATIVE_FLOAT) < 0 ||
-      H5Tinsert(memory_type, "forces_weight", HOFFSET(Hdf5GraphStructureRaw, forces_weight), H5T_NATIVE_FLOAT) < 0 ||
-      H5Tinsert(memory_type, "stress_weight", HOFFSET(Hdf5GraphStructureRaw, stress_weight), H5T_NATIVE_FLOAT) < 0 ||
-      H5Tinsert(memory_type, "virials_weight", HOFFSET(Hdf5GraphStructureRaw, virials_weight), H5T_NATIVE_FLOAT) < 0 ||
-      H5Tinsert(memory_type, "dipole_weight", HOFFSET(Hdf5GraphStructureRaw, dipole_weight), H5T_NATIVE_FLOAT) < 0) {
+      H5Tinsert(memory_type, "offset", HOFFSET(RtHdf5GraphStructure, offset), H5T_NATIVE_LLONG) < 0 ||
+      H5Tinsert(memory_type, "length", HOFFSET(RtHdf5GraphStructure, length), H5T_NATIVE_INT) < 0 ||
+      H5Tinsert(memory_type, "cell", HOFFSET(RtHdf5GraphStructure, cell), cell_type) < 0 ||
+      H5Tinsert(memory_type, "pbc", HOFFSET(RtHdf5GraphStructure, pbc), pbc_type) < 0 ||
+      H5Tinsert(memory_type, "energy", HOFFSET(RtHdf5GraphStructure, energy), H5T_NATIVE_DOUBLE) < 0 ||
+      H5Tinsert(memory_type, "stress", HOFFSET(RtHdf5GraphStructure, stress), stress_type) < 0 ||
+      H5Tinsert(memory_type, "virials", HOFFSET(RtHdf5GraphStructure, virials), virials_type) < 0 ||
+      H5Tinsert(memory_type, "dipole", HOFFSET(RtHdf5GraphStructure, dipole), dipole_type) < 0 ||
+      H5Tinsert(memory_type, "energy_weight", HOFFSET(RtHdf5GraphStructure, energy_weight), H5T_NATIVE_FLOAT) < 0 ||
+      H5Tinsert(memory_type, "forces_weight", HOFFSET(RtHdf5GraphStructure, forces_weight), H5T_NATIVE_FLOAT) < 0 ||
+      H5Tinsert(memory_type, "stress_weight", HOFFSET(RtHdf5GraphStructure, stress_weight), H5T_NATIVE_FLOAT) < 0 ||
+      H5Tinsert(memory_type, "virials_weight", HOFFSET(RtHdf5GraphStructure, virials_weight), H5T_NATIVE_FLOAT) < 0 ||
+      H5Tinsert(memory_type, "dipole_weight", HOFFSET(RtHdf5GraphStructure, dipole_weight), H5T_NATIVE_FLOAT) < 0) {
     throw std::runtime_error("failed to create HDF5 graph structures memory type");
   }
-
-  std::vector<Hdf5GraphStructureRaw> raw(static_cast<size_t>(dims[0]));
-  if (H5Dread(dataset, memory_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, raw.data()) < 0) {
-    throw std::runtime_error("failed to read HDF5 graph structures");
-  }
-
-  std::vector<RtHdf5GraphStructure> structures;
-  structures.reserve(raw.size());
-  for (const auto& entry : raw) {
-    RtHdf5GraphStructure out{};
-    out.offset = entry.offset;
-    out.length = entry.length;
-    std::copy(std::begin(entry.cell), std::end(entry.cell), std::begin(out.cell));
-    for (size_t i = 0; i < 3; ++i) {
-      out.pbc[i] = entry.pbc[i] ? 1 : 0;
-    }
-    out.energy = entry.energy;
-    std::copy(std::begin(entry.stress), std::end(entry.stress), std::begin(out.stress));
-    std::copy(std::begin(entry.virials), std::end(entry.virials), std::begin(out.virials));
-    std::copy(std::begin(entry.dipole), std::end(entry.dipole), std::begin(out.dipole));
-    out.energy_weight = entry.energy_weight;
-    out.forces_weight = entry.forces_weight;
-    out.stress_weight = entry.stress_weight;
-    out.virials_weight = entry.virials_weight;
-    out.dipole_weight = entry.dipole_weight;
-    structures.push_back(out);
-  }
-  return structures;
+  return memory_type;
 }
 
 size_t hdf5_element_count(const std::vector<hsize_t>& dims) {
@@ -594,7 +541,6 @@ void append_hdf5_samples(
       record.path = path;
       record.label = label;
       record.format = SampleFormat::Hdf5Dataset;
-      record.hdf5_dataset = state->dataset_name;
       record.hdf5_state = state;
       record.hdf5_offset = static_cast<uint64_t>(span.offset);
       record.hdf5_length = static_cast<uint64_t>(span.length);
@@ -608,7 +554,6 @@ void append_hdf5_samples(
   record.path = path;
   record.label = label;
   record.format = SampleFormat::Hdf5Dataset;
-  record.hdf5_dataset = state->dataset_name;
   record.hdf5_state = std::move(state);
   dataset.samples.push_back(std::move(record));
 }
@@ -625,6 +570,88 @@ void append_hdf5_samples(
 torch::Tensor read_hdf5_tensor(const SampleRecord&) {
   throw std::runtime_error(
       "RTorch was built without HDF5 support; enable the hdf5 Cargo feature and rebuild");
+}
+#endif
+
+struct DirectHdf5Dataset {
+#ifdef RTORCH_WITH_HDF5
+  std::shared_ptr<Hdf5DatasetState> state;
+  std::vector<Hdf5StructureSpan> spans;
+  int64_t label = 0;
+#endif
+};
+
+size_t tensor_dataset_size(const TensorDatasetImpl& dataset) {
+#ifdef RTORCH_WITH_HDF5
+  if (dataset.direct_hdf5 != nullptr) {
+    return dataset.direct_hdf5->spans.empty()
+        ? 1
+        : dataset.direct_hdf5->spans.size();
+  }
+#endif
+  return dataset.samples.size();
+}
+
+SampleRecord tensor_dataset_sample(
+    const TensorDatasetImpl& dataset,
+    size_t index) {
+#ifdef RTORCH_WITH_HDF5
+  if (dataset.direct_hdf5 != nullptr) {
+    const auto& direct = *dataset.direct_hdf5;
+    const auto size = direct.spans.empty() ? size_t{1} : direct.spans.size();
+    if (index >= size) {
+      throw std::runtime_error("dataset index out of range");
+    }
+    SampleRecord record;
+    record.label = direct.label;
+    record.format = SampleFormat::Hdf5Dataset;
+    record.hdf5_state = direct.state;
+    if (!direct.spans.empty()) {
+      const auto& span = direct.spans[index];
+      record.hdf5_offset = static_cast<uint64_t>(span.offset);
+      record.hdf5_length = static_cast<uint64_t>(span.length);
+      record.hdf5_has_slice = true;
+    }
+    return record;
+  }
+#endif
+  if (index >= dataset.samples.size()) {
+    throw std::runtime_error("dataset index out of range");
+  }
+  return dataset.samples[index];
+}
+
+#ifdef RTORCH_WITH_HDF5
+void initialize_direct_hdf5_dataset(
+    TensorDatasetImpl& dataset,
+    const fs::path& path,
+    int64_t label,
+    const std::string& dataset_name) {
+  auto direct = std::make_shared<DirectHdf5Dataset>();
+  direct->state = std::make_shared<Hdf5DatasetState>();
+  direct->state->path = path;
+  direct->state->file = open_hdf5_file(path);
+  direct->state->dataset_name =
+      resolve_hdf5_dataset_name(direct->state->file, dataset_name);
+  direct->state->dataset = Hdf5Handle(
+      H5Dopen2(
+          direct->state->file,
+          direct->state->dataset_name.c_str(),
+          H5P_DEFAULT),
+      H5Dclose);
+  if (direct->state->dataset.id < 0) {
+    throw std::runtime_error(
+        "failed to open HDF5 dataset: " + direct->state->dataset_name);
+  }
+  direct->spans = read_hdf5_structure_spans(direct->state->file);
+  for (const auto& span : direct->spans) {
+    if (span.offset < 0 || span.length < 0) {
+      throw std::runtime_error(
+          "HDF5 structures contain negative offset or length");
+    }
+  }
+  direct->label = label;
+  dataset.direct_hdf5 = std::move(direct);
 }
 #endif
 
@@ -979,7 +1006,15 @@ struct RtTensor {
 };
 
 struct RtHdf5GraphDataset {
-  std::vector<RtHdf5GraphStructure> structures;
+#ifdef RTORCH_WITH_HDF5
+  Hdf5Handle file;
+  Hdf5Handle dataset;
+  Hdf5Handle memory_type;
+  size_t length = 0;
+  size_t cache_capacity = 32;
+  mutable size_t cache_start = 0;
+  mutable std::vector<RtHdf5GraphStructure> cache;
+#endif
 };
 
 std::unique_ptr<RtOwnedBatch> make_owned_batch(
@@ -1430,7 +1465,8 @@ extern "C" RtTensorDataset* rt_tensor_dataset_hdf5_file_new(
     auto dataset = std::make_unique<RtTensorDataset>();
     const fs::path hdf5_path(path);
     dataset->inner.class_names.push_back(hdf5_path.stem().string());
-    append_hdf5_samples(dataset->inner, hdf5_path, 0, dataset_name);
+    initialize_direct_hdf5_dataset(
+        dataset->inner, hdf5_path, 0, dataset_name);
     return dataset.release();
 #endif
   }, nullptr);
@@ -1445,7 +1481,7 @@ extern "C" size_t rt_tensor_dataset_len(const RtTensorDataset* dataset) {
     if (dataset == nullptr) {
       throw std::runtime_error("dataset pointer was null");
     }
-    return dataset->inner.samples.size();
+    return tensor_dataset_size(dataset->inner);
   }, 0);
 }
 
@@ -1480,11 +1516,7 @@ extern "C" RtOwnedBatch* rt_tensor_dataset_get(
     if (dataset == nullptr) {
       throw std::runtime_error("dataset pointer was null");
     }
-    if (index >= dataset->inner.samples.size()) {
-      throw std::runtime_error("dataset index out of range");
-    }
-
-    const auto& sample = dataset->inner.samples[index];
+    const auto sample = tensor_dataset_sample(dataset->inner, index);
     auto tensor = load_tensor_from_sample(sample);
     if (pipeline != nullptr) {
       tensor = pipeline->inner.apply(tensor);
@@ -1574,7 +1606,8 @@ extern "C" int rt_data_loader_next(RtDataLoader* loader, RtOwnedBatch** out) {
 
     for (size_t i = 0; i < take; ++i) {
       const auto sample_index = loader->inner.indices[loader->inner.cursor + i];
-      const auto& sample = loader->inner.dataset->samples[sample_index];
+      const auto sample =
+          tensor_dataset_sample(*loader->inner.dataset, sample_index);
       auto tensor = load_tensor_from_sample(sample);
       if (loader->inner.pipeline != nullptr) {
         tensor = loader->inner.pipeline->apply(tensor);
@@ -1673,9 +1706,37 @@ extern "C" RtHdf5GraphDataset* rt_hdf5_graph_dataset_new(const char* path) {
         "RTorch was built without HDF5 support; enable the hdf5 Cargo feature and rebuild");
     return static_cast<RtHdf5GraphDataset*>(nullptr);
 #else
-    auto file = open_hdf5_file(fs::path(path));
     auto dataset = std::make_unique<RtHdf5GraphDataset>();
-    dataset->structures = read_hdf5_graph_structures(file);
+    dataset->file = open_hdf5_file(fs::path(path));
+    if (!hdf5_dataset_exists(dataset->file, "structures")) {
+      throw std::runtime_error(
+          "HDF5 file does not contain a graph structures dataset");
+    }
+    dataset->dataset = Hdf5Handle(
+        H5Dopen2(dataset->file, "structures", H5P_DEFAULT), H5Dclose);
+    if (dataset->dataset.id < 0) {
+      throw std::runtime_error("failed to open HDF5 structures dataset");
+    }
+    const auto dims = hdf5_dataset_dims(dataset->dataset);
+    if (dims.size() != 1) {
+      throw std::runtime_error(
+          "HDF5 structures dataset must be one-dimensional");
+    }
+    dataset->length = static_cast<size_t>(dims[0]);
+    dataset->memory_type = make_hdf5_graph_memory_type();
+
+    Hdf5Handle creation_properties(
+        H5Dget_create_plist(dataset->dataset), H5Pclose);
+    if (creation_properties.id >= 0 &&
+        H5Pget_layout(creation_properties) == H5D_CHUNKED) {
+      hsize_t chunk_size = 0;
+      if (H5Pget_chunk(creation_properties, 1, &chunk_size) == 1 &&
+          chunk_size > 0 &&
+          chunk_size <= static_cast<hsize_t>(
+              std::numeric_limits<size_t>::max())) {
+        dataset->cache_capacity = static_cast<size_t>(chunk_size);
+      }
+    }
     return dataset.release();
 #endif
   }, nullptr);
@@ -1690,7 +1751,11 @@ extern "C" size_t rt_hdf5_graph_dataset_len(const RtHdf5GraphDataset* dataset) {
     if (dataset == nullptr) {
       throw std::runtime_error("HDF5 graph dataset pointer was null");
     }
-    return dataset->structures.size();
+#ifdef RTORCH_WITH_HDF5
+    return dataset->length;
+#else
+    return 0;
+#endif
   }, 0);
 }
 
@@ -1702,10 +1767,51 @@ extern "C" bool rt_hdf5_graph_dataset_get(
     if (dataset == nullptr || out == nullptr) {
       throw std::runtime_error("HDF5 graph dataset or output pointer was null");
     }
-    if (index >= dataset->structures.size()) {
+#ifndef RTORCH_WITH_HDF5
+    throw std::runtime_error(
+        "RTorch was built without HDF5 graph dataset support");
+#else
+    if (index >= dataset->length) {
       throw std::runtime_error("HDF5 graph structure index out of range");
     }
-    *out = dataset->structures[index];
+    if (dataset->cache.empty() || index < dataset->cache_start ||
+        index >= dataset->cache_start + dataset->cache.size()) {
+      const auto capacity = std::max(size_t{1}, dataset->cache_capacity);
+      dataset->cache_start = (index / capacity) * capacity;
+      const auto count =
+          std::min(capacity, dataset->length - dataset->cache_start);
+      dataset->cache.resize(count);
+
+      Hdf5Handle file_space(H5Dget_space(dataset->dataset), H5Sclose);
+      const hsize_t start[] = {
+          static_cast<hsize_t>(dataset->cache_start)};
+      const hsize_t extent[] = {static_cast<hsize_t>(count)};
+      if (file_space.id < 0 ||
+          H5Sselect_hyperslab(
+              file_space,
+              H5S_SELECT_SET,
+              start,
+              nullptr,
+              extent,
+              nullptr) < 0) {
+        throw std::runtime_error(
+            "failed to select HDF5 graph metadata chunk");
+      }
+      Hdf5Handle memory_space(
+          H5Screate_simple(1, extent, nullptr), H5Sclose);
+      if (memory_space.id < 0 ||
+          H5Dread(
+              dataset->dataset,
+              dataset->memory_type,
+              memory_space,
+              file_space,
+              H5P_DEFAULT,
+              dataset->cache.data()) < 0) {
+        throw std::runtime_error("failed to read HDF5 graph metadata chunk");
+      }
+    }
+    *out = dataset->cache[index - dataset->cache_start];
     return true;
+#endif
   }, false);
 }
