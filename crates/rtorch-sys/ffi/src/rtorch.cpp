@@ -576,17 +576,49 @@ torch::Tensor read_hdf5_tensor(const SampleRecord&) {
 struct DirectHdf5Dataset {
 #ifdef RTORCH_WITH_HDF5
   std::shared_ptr<Hdf5DatasetState> state;
-  std::vector<Hdf5StructureSpan> spans;
+  Hdf5Handle structures;
+  Hdf5Handle span_type;
+  size_t length = 1;
+  mutable size_t cache_start = 0;
+  mutable std::vector<Hdf5StructureSpan> spans;
   int64_t label = 0;
+
+  Hdf5StructureSpan span_at(size_t index) const {
+    // Bounded read-ahead amortizes HDF5 calls without an O(dataset size) table.
+    constexpr size_t capacity = 4096;
+    if (spans.empty() || index < cache_start || index - cache_start >= spans.size()) {
+      const auto start_index = (index / capacity) * capacity;
+      const hsize_t start[] = {static_cast<hsize_t>(start_index)};
+      const hsize_t count[] = {
+          static_cast<hsize_t>(std::min(capacity, length - start_index))};
+      Hdf5Handle file_space(H5Dget_space(structures), H5Sclose);
+      Hdf5Handle memory_space(H5Screate_simple(1, count, nullptr), H5Sclose);
+      spans.clear();  // Never reuse a partial cache after a failed read.
+      if (file_space.id < 0 || memory_space.id < 0 ||
+          H5Sselect_hyperslab(file_space, H5S_SELECT_SET, start, nullptr, count, nullptr) < 0) {
+        throw std::runtime_error("failed to select HDF5 structure spans");
+      }
+      std::vector<Hdf5StructureSpan> next(static_cast<size_t>(count[0]));
+      if (H5Dread(structures, span_type, memory_space, file_space, H5P_DEFAULT, next.data()) < 0) {
+        throw std::runtime_error("failed to read HDF5 structure spans");
+      }
+      for (const auto& span : next) {
+        if (span.offset < 0 || span.length < 0) {
+          throw std::runtime_error("HDF5 structures contain negative offset or length");
+        }
+      }
+      spans = std::move(next);
+      cache_start = start_index;
+    }
+    return spans[index - cache_start];
+  }
 #endif
 };
 
 size_t tensor_dataset_size(const TensorDatasetImpl& dataset) {
 #ifdef RTORCH_WITH_HDF5
   if (dataset.direct_hdf5 != nullptr) {
-    return dataset.direct_hdf5->spans.empty()
-        ? 1
-        : dataset.direct_hdf5->spans.size();
+    return dataset.direct_hdf5->length;
   }
 #endif
   return dataset.samples.size();
@@ -598,7 +630,7 @@ SampleRecord tensor_dataset_sample(
 #ifdef RTORCH_WITH_HDF5
   if (dataset.direct_hdf5 != nullptr) {
     const auto& direct = *dataset.direct_hdf5;
-    const auto size = direct.spans.empty() ? size_t{1} : direct.spans.size();
+    const auto size = direct.length;
     if (index >= size) {
       throw std::runtime_error("dataset index out of range");
     }
@@ -606,8 +638,8 @@ SampleRecord tensor_dataset_sample(
     record.label = direct.label;
     record.format = SampleFormat::Hdf5Dataset;
     record.hdf5_state = direct.state;
-    if (!direct.spans.empty()) {
-      const auto& span = direct.spans[index];
+    if (direct.structures.id >= 0) {
+      const auto span = direct.span_at(index);
       record.hdf5_offset = static_cast<uint64_t>(span.offset);
       record.hdf5_length = static_cast<uint64_t>(span.length);
       record.hdf5_has_slice = true;
@@ -643,11 +675,23 @@ void initialize_direct_hdf5_dataset(
     throw std::runtime_error(
         "failed to open HDF5 dataset: " + direct->state->dataset_name);
   }
-  direct->spans = read_hdf5_structure_spans(direct->state->file);
-  for (const auto& span : direct->spans) {
-    if (span.offset < 0 || span.length < 0) {
-      throw std::runtime_error(
-          "HDF5 structures contain negative offset or length");
+  if (hdf5_dataset_exists(direct->state->file, "structures")) {
+    direct->structures = Hdf5Handle(
+        H5Dopen2(direct->state->file, "structures", H5P_DEFAULT), H5Dclose);
+    if (direct->structures.id < 0) {
+      throw std::runtime_error("failed to open HDF5 structures dataset");
+    }
+    const auto dims = hdf5_dataset_dims(direct->structures);
+    if (dims.size() != 1) {
+      throw std::runtime_error("HDF5 structures dataset must be one-dimensional");
+    }
+    direct->length = static_cast<size_t>(dims[0]);
+    direct->span_type = Hdf5Handle(
+        H5Tcreate(H5T_COMPOUND, sizeof(Hdf5StructureSpan)), H5Tclose);
+    if (direct->span_type.id < 0 ||
+        H5Tinsert(direct->span_type, "offset", HOFFSET(Hdf5StructureSpan, offset), H5T_NATIVE_LLONG) < 0 ||
+        H5Tinsert(direct->span_type, "length", HOFFSET(Hdf5StructureSpan, length), H5T_NATIVE_INT) < 0) {
+      throw std::runtime_error("failed to create HDF5 structures memory type");
     }
   }
   direct->label = label;
@@ -1734,7 +1778,7 @@ extern "C" RtHdf5GraphDataset* rt_hdf5_graph_dataset_new(const char* path) {
           chunk_size > 0 &&
           chunk_size <= static_cast<hsize_t>(
               std::numeric_limits<size_t>::max())) {
-        dataset->cache_capacity = static_cast<size_t>(chunk_size);
+        dataset->cache_capacity = std::min(size_t{4096}, static_cast<size_t>(chunk_size));
       }
     }
     return dataset.release();
