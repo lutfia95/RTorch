@@ -966,9 +966,12 @@ impl PyHDF5GraphLoader {
     }
 
     fn reset_indices(&mut self, length: usize) {
-        self.indices = (0..length).collect();
         if self.shuffle {
+            self.indices.clear();
+            self.indices.extend(0..length);
             shuffle_indices(&mut self.indices, self.seed);
+        } else {
+            self.indices.clear();
         }
         self.cursor = 0;
     }
@@ -1052,20 +1055,26 @@ impl PyHDF5GraphLoader {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
-        if self.cursor >= self.indices.len() {
+        let length = self.dataset_len(py);
+        if self.cursor >= length {
             return Ok(None);
         }
 
-        let end = (self.cursor + self.batch_size).min(self.indices.len());
+        let end = self.cursor.saturating_add(self.batch_size).min(length);
         if self.drop_last && end - self.cursor < self.batch_size {
-            self.cursor = self.indices.len();
+            self.cursor = length;
             return Ok(None);
         }
 
         let dataset = self.dataset.bind(py).borrow();
         let mut graphs = Vec::with_capacity(end - self.cursor);
-        for index in &self.indices[self.cursor..end] {
-            graphs.push(dataset.graph_at(py, *index)?);
+        for position in self.cursor..end {
+            let index = if self.shuffle {
+                self.indices[position]
+            } else {
+                position
+            };
+            graphs.push(dataset.graph_at(py, index)?);
         }
         self.cursor = end;
         pack_dynamic_batches(py, graphs, self.max_nodes, self.max_edges, self.drop).map(Some)
