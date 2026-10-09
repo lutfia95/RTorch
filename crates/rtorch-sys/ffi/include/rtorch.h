@@ -78,6 +78,11 @@ RtTensor* rt_tensor_from_data(
     const int64_t* shape,
     size_t shape_len,
     bool requires_grad);
+// Takes ownership of owner even on failure; release_owner must be non-null.
+RtTensor* rt_tensor_from_owned_data(
+    void* data, size_t len, int scalar_type,
+    const int64_t* shape, size_t shape_len,
+    void* owner, void (*release_owner)(void*));
 RtTensor* rt_tensor_zeros(
     const int64_t* shape,
     size_t shape_len,
@@ -147,6 +152,8 @@ RtOwnedBatch* rt_tensor_dataset_get(
     const RtTensorDataset* dataset,
     size_t index,
     RtTransformPipeline* pipeline);
+RtTensor* rt_tensor_dataset_read_hdf5_slice(
+    const RtTensorDataset* dataset, uint64_t offset, uint64_t length);
 
 RtDataLoader* rt_data_loader_new(
     RtTensorDataset* dataset,

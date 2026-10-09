@@ -3,8 +3,15 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace {
+
+int owner_releases = 0;
+void release_vector(void* owner) {
+  ++owner_releases;
+  delete static_cast<std::vector<float>*>(owner);
+}
 
 void assert_close(float actual, float expected) {
   assert(std::fabs(actual - expected) < 1.0e-6F);
@@ -13,6 +20,31 @@ void assert_close(float actual, float expected) {
 }  // namespace
 
 int main() {
+  const int64_t owned_shape[] = {2};
+  auto* owned_values = new std::vector<float>{4.0F, 5.0F};
+  auto* owned = rt_tensor_from_owned_data(owned_values->data(), 2, RT_SCALAR_F32,
+      owned_shape, 1, owned_values, release_vector);
+  assert(owned != nullptr && owner_releases == 0);
+  auto* view = rt_tensor_reshape(owned, owned_shape, 1);
+  rt_tensor_free(owned);
+  assert(owner_releases == 0);
+  float read_values[2] = {};
+  assert(rt_tensor_copy_f32(view, read_values, 2));
+  assert_close(read_values[0], 4.0F);
+  rt_tensor_free(view);
+  assert(owner_releases == 1);
+  auto* invalid_values = new std::vector<float>{1.0F};
+  assert(rt_tensor_from_owned_data(invalid_values->data(), 1, RT_SCALAR_F32,
+      owned_shape, 1, invalid_values, release_vector) == nullptr);
+  assert(owner_releases == 2);
+  auto* empty_values = new std::vector<float>;
+  const int64_t empty_shape[] = {0};
+  auto* empty = rt_tensor_from_owned_data(empty_values->data(), 0, RT_SCALAR_F32,
+      empty_shape, 1, empty_values, release_vector);
+  assert(empty != nullptr && owner_releases == 3);
+  rt_tensor_free(empty);
+  assert(owner_releases == 3);
+
   const float values[] = {1.0F, 2.0F, 3.0F};
   const int64_t vector_shape[] = {3};
   RtTensor* input = rt_tensor_from_data(

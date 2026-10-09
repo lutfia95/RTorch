@@ -1,22 +1,40 @@
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList};
 
 use rtorch_core::{
-    HDF5GraphMetadataDataset as RtHDF5GraphMetadataDataset, Tensor as RtTensor,
+    HDF5GraphMetadataDataset as RtHDF5GraphMetadataDataset, HDF5GraphStructure, Tensor as RtTensor,
     TensorDataset as RtTensorDataset,
 };
 
 use crate::{tensor_to_torch, to_py_err};
 
-struct GraphBuildResult {
-    graph: PyObject,
-    num_nodes: usize,
-    num_edges: usize,
+static DATA_BATCH_CLASS: GILOnceCell<PyObject> = GILOnceCell::new();
+
+struct PreparedGraph {
+    entry: HDF5GraphStructure,
+    positions: Vec<f64>,
+    forces: Vec<f64>,
+    atomic_numbers: Vec<i64>,
+    species: Vec<usize>,
+    species_count: usize,
+    neighborhood: Neighborhood,
+    index: usize,
+}
+
+impl PreparedGraph {
+    fn num_nodes(&self) -> usize {
+        self.atomic_numbers.len()
+    }
+    fn num_edges(&self) -> usize {
+        self.neighborhood.edge_index.len() / 2
+    }
 }
 
 struct Neighborhood {
@@ -41,12 +59,33 @@ struct ImageAtom {
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
 struct BinKey(i64, i64, i64);
 
+// Integer spatial keys do not need a string-oriented cryptographic hash.
+// Keep the species table on the standard hasher; specialize only bin lookups.
+#[derive(Default)]
+struct SpatialHasher(u64);
+impl Hasher for SpatialHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(*byte as u64);
+        }
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_i64(&mut self, value: i64) {
+        self.write_u64(value as u64);
+    }
+}
+type SpatialMap<V> = HashMap<BinKey, V, BuildHasherDefault<SpatialHasher>>;
+
 #[derive(Clone, Copy)]
 struct EdgeRecord {
     sender: usize,
     receiver: usize,
     unit_shift: [i64; 3],
-    shift: [f64; 3],
 }
 
 struct PreparedNeighborhood {
@@ -239,10 +278,7 @@ fn prepare_neighborhood(
     }
 
     let natoms = positions.len() / 3;
-    let atom_positions = positions
-        .chunks_exact(3)
-        .map(|position| [position[0], position[1], position[2]])
-        .collect::<Vec<_>>();
+    let atom_positions = positions.as_chunks::<3>().0.to_vec();
     let mut wrapped_positions = atom_positions.clone();
     let mut wrap_offsets = vec![[0_i64; 3]; natoms];
 
@@ -317,14 +353,7 @@ fn edge_record(
     receiver: usize,
     translation: Translation,
 ) -> PyResult<Option<EdgeRecord>> {
-    let mut unit_shift = [0_i64; 3];
-    for axis in 0..3 {
-        unit_shift[axis] = translation.unit[axis]
-            .checked_add(prepared.wrap_offsets[sender][axis])
-            .and_then(|value| value.checked_sub(prepared.wrap_offsets[receiver][axis]))
-            .ok_or_else(|| PyValueError::new_err("periodic image offset overflowed."))?;
-    }
-    if sender == receiver && unit_shift == [0, 0, 0] {
+    if sender == receiver && translation.unit == [0, 0, 0] {
         return Ok(None);
     }
 
@@ -343,18 +372,18 @@ fn edge_record(
         return Ok(None);
     }
 
-    let shift = lattice_shift(unit_shift, &prepared.cell);
-    if shift.iter().any(|value| !value.is_finite()) {
-        return Err(PyValueError::new_err(
-            "periodic Cartesian shift contains non-finite values.",
-        ));
+    let mut unit_shift = [0_i64; 3];
+    for (axis, unit) in unit_shift.iter_mut().enumerate() {
+        *unit = translation.unit[axis]
+            .checked_add(prepared.wrap_offsets[sender][axis])
+            .and_then(|value| value.checked_sub(prepared.wrap_offsets[receiver][axis]))
+            .ok_or_else(|| PyValueError::new_err("periodic image offset overflowed."))?;
     }
 
     Ok(Some(EdgeRecord {
         sender,
         receiver,
         unit_shift,
-        shift,
     }))
 }
 
@@ -370,7 +399,7 @@ fn get_neighborhood_brute_force(prepared: &PreparedNeighborhood) -> PyResult<Nei
             }
         }
     }
-    Ok(records_to_neighborhood(records, prepared.cell))
+    records_to_neighborhood(records, prepared.cell)
 }
 
 fn bin_key(position: [f64; 3], inverse_bin_size: f64) -> BinKey {
@@ -385,15 +414,14 @@ fn get_neighborhood_cell_list(prepared: &PreparedNeighborhood) -> PyResult<Neigh
     let expanded_atoms = prepared
         .positions
         .len()
-        .checked_mul(prepared.translations.len())
-        .unwrap_or(usize::MAX);
+        .saturating_mul(prepared.translations.len());
     if expanded_atoms > MAX_EXPANDED_IMAGE_ATOMS {
         return get_neighborhood_translation_queries(prepared);
     }
 
     let natoms = prepared.positions.len();
     let inverse_bin_size = prepared.cutoff.recip();
-    let mut bins: HashMap<BinKey, Vec<ImageAtom>> = HashMap::new();
+    let mut bins: SpatialMap<Vec<ImageAtom>> = SpatialMap::default();
 
     for receiver in 0..natoms {
         for (translation_index, translation) in prepared.translations.iter().enumerate() {
@@ -442,13 +470,13 @@ fn get_neighborhood_cell_list(prepared: &PreparedNeighborhood) -> PyResult<Neigh
         }
     }
 
-    Ok(records_to_neighborhood(records, prepared.cell))
+    records_to_neighborhood(records, prepared.cell)
 }
 
 fn get_neighborhood_translation_queries(prepared: &PreparedNeighborhood) -> PyResult<Neighborhood> {
     let natoms = prepared.positions.len();
     let inverse_bin_size = prepared.cutoff.recip();
-    let mut bins: HashMap<BinKey, Vec<usize>> = HashMap::new();
+    let mut bins: SpatialMap<Vec<usize>> = SpatialMap::default();
     for receiver in 0..natoms {
         bins.entry(bin_key(
             prepared.wrapped_positions[receiver],
@@ -497,10 +525,10 @@ fn get_neighborhood_translation_queries(prepared: &PreparedNeighborhood) -> PyRe
         }
     }
 
-    Ok(records_to_neighborhood(records, prepared.cell))
+    records_to_neighborhood(records, prepared.cell)
 }
 
-fn records_to_neighborhood(records: Vec<EdgeRecord>, cell: [f64; 9]) -> Neighborhood {
+fn records_to_neighborhood(records: Vec<EdgeRecord>, cell: [f64; 9]) -> PyResult<Neighborhood> {
     // Every search iterates senders in ascending order, matching Matscipy's
     // ordering guarantee. It deliberately does not sort receivers: sorting is
     // not part of that contract and adds O(E log E) work to every structure.
@@ -511,16 +539,22 @@ fn records_to_neighborhood(records: Vec<EdgeRecord>, cell: [f64; 9]) -> Neighbor
     let mut shifts = Vec::with_capacity(3 * records.len());
     let mut unit_shifts = Vec::with_capacity(3 * records.len());
     for record in records {
-        shifts.extend_from_slice(&record.shift);
+        let shift = lattice_shift(record.unit_shift, &cell);
+        if shift.iter().any(|value| !value.is_finite()) {
+            return Err(PyValueError::new_err(
+                "periodic Cartesian shift contains non-finite values.",
+            ));
+        }
+        shifts.extend_from_slice(&shift);
         unit_shifts.extend(record.unit_shift.map(|value| value as f64));
     }
 
-    Neighborhood {
+    Ok(Neighborhood {
         edge_index,
         shifts,
         unit_shifts,
         cell,
-    }
+    })
 }
 
 fn voigt_to_matrix(stress: [f64; 6]) -> [f64; 9] {
@@ -555,33 +589,43 @@ fn rt_to_torch_dtype(
         .into_py(py))
 }
 
-fn reshape_contiguous(py: Python<'_>, object: PyObject, shape: Vec<i64>) -> PyResult<PyObject> {
-    let reshaped = object.bind(py).call_method1("reshape", (shape,))?;
-    Ok(reshaped.call_method0("contiguous")?.into_py(py))
-}
-
 fn float_tensor(
     py: Python<'_>,
-    values: &[f64],
+    values: Vec<f64>,
     shape: &[usize],
     dtype: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
-    let tensor = RtTensor::from_slice(values, shape, false).map_err(to_py_err)?;
-    rt_to_torch_dtype(py, &tensor, dtype)
+    // Allocate the final dtype directly for the common float32/float64 paths.
+    // Geometry and cutoff decisions remain double precision.
+    match dtype.str()?.to_str()? {
+        "torch.float32" => {
+            let values: Vec<f32> = values.into_iter().map(|v| v as f32).collect();
+            let tensor = RtTensor::from_vec(values, shape).map_err(to_py_err)?;
+            rt_to_torch(py, &tensor)
+        }
+        "torch.float64" => {
+            let tensor = RtTensor::from_vec(values, shape).map_err(to_py_err)?;
+            rt_to_torch(py, &tensor)
+        }
+        _ => {
+            let tensor = RtTensor::from_vec(values, shape).map_err(to_py_err)?;
+            rt_to_torch_dtype(py, &tensor, dtype)
+        }
+    }
 }
 
-fn i64_tensor(py: Python<'_>, values: &[i64], shape: &[usize]) -> PyResult<PyObject> {
-    let tensor = RtTensor::from_slice(values, shape, false).map_err(to_py_err)?;
+fn i64_tensor(py: Python<'_>, values: Vec<i64>, shape: &[usize]) -> PyResult<PyObject> {
+    let tensor = RtTensor::from_vec(values, shape).map_err(to_py_err)?;
     rt_to_torch(py, &tensor)
 }
 
-fn bool_tensor(py: Python<'_>, values: &[bool], shape: &[usize]) -> PyResult<PyObject> {
-    let tensor = RtTensor::from_slice(values, shape, false).map_err(to_py_err)?;
+fn bool_tensor(py: Python<'_>, values: Vec<bool>, shape: &[usize]) -> PyResult<PyObject> {
+    let tensor = RtTensor::from_vec(values, shape).map_err(to_py_err)?;
     rt_to_torch(py, &tensor)
 }
 
 fn scalar_float_tensor(py: Python<'_>, value: f64, dtype: &Bound<'_, PyAny>) -> PyResult<PyObject> {
-    float_tensor(py, &[value], &[], dtype)
+    float_tensor(py, vec![value], &[], dtype)
 }
 
 #[pyclass(name = "HDF5GraphDataset", unsendable)]
@@ -590,6 +634,11 @@ pub struct PyHDF5GraphDataset {
     r_max: f64,
     atomic_numbers: Vec<i64>,
     z_to_index: HashMap<i64, usize>,
+    handles: Option<GraphHandles>,
+    length: usize,
+}
+
+struct GraphHandles {
     positions: RtTensorDataset,
     forces: RtTensorDataset,
     atomic_numbers_dataset: RtTensorDataset,
@@ -642,15 +691,18 @@ impl PyHDF5GraphDataset {
             r_max,
             atomic_numbers,
             z_to_index,
-            positions,
-            forces,
-            atomic_numbers_dataset,
-            metadata,
+            handles: Some(GraphHandles {
+                positions,
+                forces,
+                atomic_numbers_dataset,
+                metadata,
+            }),
+            length,
         })
     }
 
     fn normalized_index(&self, index: isize) -> PyResult<usize> {
-        let length = self.metadata.len() as isize;
+        let length = self.length as isize;
         let normalized = if index < 0 { length + index } else { index };
         if normalized < 0 || normalized >= length {
             return Err(PyIndexError::new_err(index));
@@ -658,23 +710,42 @@ impl PyHDF5GraphDataset {
         Ok(normalized as usize)
     }
 
-    fn graph_at(&self, py: Python<'_>, index: usize) -> PyResult<GraphBuildResult> {
-        let entry = self.metadata.get(index).map_err(to_py_err)?;
-        let positions_sample = self.positions.get(index).map_err(to_py_err)?;
-        let forces_sample = self.forces.get(index).map_err(to_py_err)?;
-        let atomic_numbers_sample = self.atomic_numbers_dataset.get(index).map_err(to_py_err)?;
-
-        let positions_tensor = positions_sample.tensor().map_err(to_py_err)?;
-        let forces_tensor = forces_sample.tensor().map_err(to_py_err)?;
-        let atomic_numbers_tensor = atomic_numbers_sample.tensor().map_err(to_py_err)?;
-
-        let positions_values = positions_tensor.to_vec_f64().map_err(to_py_err)?;
-        let atomic_number_values = atomic_numbers_tensor.to_vec_i64().map_err(to_py_err)?;
-        if !positions_values.len().is_multiple_of(3) {
+    // This phase creates no Python objects. Its buffers live for one outer batch.
+    fn prepare_graph(&self, py: Python<'_>, index: usize) -> PyResult<PreparedGraph> {
+        let handles = self.handles.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("HDF5 graph dataset is closed")
+        })?;
+        let entry = handles.metadata.get(index).map_err(to_py_err)?;
+        if entry.offset < 0 || entry.length < 0 {
+            return Err(PyValueError::new_err(
+                "HDF5 structures contain negative offset or length",
+            ));
+        }
+        let offset = entry.offset as u64;
+        let length = entry.length as u64;
+        let positions = handles
+            .positions
+            .read_hdf5_slice(offset, length)
+            .map_err(to_py_err)?
+            .to_vec_f64()
+            .map_err(to_py_err)?;
+        let forces = handles
+            .forces
+            .read_hdf5_slice(offset, length)
+            .map_err(to_py_err)?
+            .to_vec_f64()
+            .map_err(to_py_err)?;
+        let atomic_numbers = handles
+            .atomic_numbers_dataset
+            .read_hdf5_slice(offset, length)
+            .map_err(to_py_err)?
+            .to_vec_i64()
+            .map_err(to_py_err)?;
+        if !positions.len().is_multiple_of(3) {
             return Err(PyValueError::new_err("positions must have shape [N, 3]."));
         }
-        let natoms = positions_values.len() / 3;
-        if forces_tensor.numel() != positions_values.len() || atomic_number_values.len() != natoms {
+        let natoms = positions.len() / 3;
+        if forces.len() != positions.len() || atomic_numbers.len() != natoms {
             return Err(PyValueError::new_err(format!(
                 "Inconsistent atom count at index {index}."
             )));
@@ -684,99 +755,35 @@ impl PyHDF5GraphDataset {
                 "Structure metadata length does not match positions at index {index}."
             )));
         }
-
-        let (default_dtype, long_dtype) = torch_default_dtype(py)?;
-        let positions = reshape_contiguous(
-            py,
-            rt_to_torch_dtype(py, &positions_tensor, &default_dtype)?,
-            vec![natoms as i64, 3],
-        )?;
-        let forces = reshape_contiguous(
-            py,
-            rt_to_torch_dtype(py, &forces_tensor, &default_dtype)?,
-            vec![natoms as i64, 3],
-        )?;
-        let atomic_numbers = reshape_contiguous(
-            py,
-            rt_to_torch_dtype(py, &atomic_numbers_tensor, &long_dtype)?,
-            vec![natoms as i64],
-        )?;
-
-        let mut node_attrs = vec![0.0_f64; natoms * self.atomic_numbers.len()];
-        for (atom_index, atomic_number) in atomic_number_values.iter().enumerate() {
-            let Some(species_index) = self.z_to_index.get(atomic_number) else {
-                return Err(PyValueError::new_err(format!(
-                    "Observed atom type {atomic_number} that is not listed in the atomic numbers table."
-                )));
-            };
-            node_attrs[atom_index * self.atomic_numbers.len() + species_index] = 1.0;
-        }
-
+        let species = atomic_numbers
+            .iter()
+            .map(|z| {
+                self.z_to_index.get(z).copied().ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Observed atom type {z} that is not listed in the atomic numbers table."
+                    ))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         let r_max = self.r_max;
         let pbc = entry.pbc;
-        let input_cell = entry.cell;
-        let neighborhood =
-            py.allow_threads(move || get_neighborhood(&positions_values, r_max, pbc, input_cell))?;
-        let edge_count = neighborhood.edge_index.len() / 2;
-        let stress = voigt_to_matrix(entry.stress);
-        let pbc_values = entry.pbc;
-        let tags = vec![0.0_f64; natoms];
-
-        let data_module = py.import_bound("torch_geometric.data")?;
-        let data_cls = data_module.getattr("Data")?;
-        let kwargs = PyDict::new_bound(py);
-        kwargs.set_item(
-            "cell",
-            float_tensor(py, &neighborhood.cell, &[3, 3], &default_dtype)?,
-        )?;
-        kwargs.set_item("cell_volume", determinant(&entry.cell).abs())?;
-        kwargs.set_item("pos", positions.clone_ref(py))?;
-        kwargs.set_item("positions", positions)?;
-        kwargs.set_item(
-            "node_attrs",
-            float_tensor(
-                py,
-                &node_attrs,
-                &[natoms, self.atomic_numbers.len()],
-                &default_dtype,
-            )?,
-        )?;
-        kwargs.set_item("atomic_numbers", atomic_numbers)?;
-        kwargs.set_item("natoms", natoms)?;
-        kwargs.set_item("tags", float_tensor(py, &tags, &[natoms], &default_dtype)?)?;
-        kwargs.set_item(
-            "edge_index",
-            i64_tensor(py, &neighborhood.edge_index, &[2, edge_count])?,
-        )?;
-        kwargs.set_item(
-            "shifts",
-            float_tensor(py, &neighborhood.shifts, &[edge_count, 3], &default_dtype)?,
-        )?;
-        kwargs.set_item(
-            "unit_shifts",
-            float_tensor(
-                py,
-                &neighborhood.unit_shifts,
-                &[edge_count, 3],
-                &default_dtype,
-            )?,
-        )?;
-        kwargs.set_item("y", scalar_float_tensor(py, entry.energy, &default_dtype)?)?;
-        kwargs.set_item("force", forces)?;
-        kwargs.set_item(
-            "stress",
-            float_tensor(py, &stress, &[1, 3, 3], &default_dtype)?,
-        )?;
-        kwargs.set_item("pbc", bool_tensor(py, &pbc_values, &[3])?)?;
-
-        let graph = data_cls.call((), Some(&kwargs))?;
-        graph.setattr("idx", index)?;
-
-        Ok(GraphBuildResult {
-            graph: graph.into_py(py),
-            num_nodes: natoms,
-            num_edges: edge_count,
+        let cell = entry.cell;
+        let neighborhood = py.allow_threads(|| get_neighborhood(&positions, r_max, pbc, cell))?;
+        Ok(PreparedGraph {
+            entry,
+            positions,
+            forces,
+            atomic_numbers,
+            species,
+            species_count: self.atomic_numbers.len(),
+            neighborhood,
+            index,
         })
+    }
+
+    fn graph_at(&self, py: Python<'_>, index: usize) -> PyResult<PyObject> {
+        let graph = self.prepare_graph(py, index)?;
+        materialize_graphs(py, vec![graph], false)
     }
 }
 
@@ -816,15 +823,17 @@ impl PyHDF5GraphDataset {
         &self.path
     }
 
-    fn close(&mut self) {}
+    fn close(&mut self) {
+        self.handles = None;
+    }
 
     fn __len__(&self) -> usize {
-        self.metadata.len()
+        self.length
     }
 
     fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<PyObject> {
         let index = self.normalized_index(index)?;
-        self.graph_at(py, index).map(|result| result.graph)
+        self.graph_at(py, index)
     }
 }
 
@@ -856,7 +865,7 @@ impl PyHDF5GraphDatasetCollection {
                 atomic_numbers.clone(),
                 niggli_reduce,
             )?;
-            length += dataset.metadata.len();
+            length += dataset.length;
             datasets.push(dataset);
         }
         Ok(Self {
@@ -876,14 +885,11 @@ impl PyHDF5GraphDatasetCollection {
     }
 
     fn dataset_for_index(&self, index: usize) -> (usize, usize) {
-        let insertion = match self.offsets.binary_search(&index) {
-            Ok(value) => value,
-            Err(value) => value - 1,
-        };
+        let insertion = self.offsets.partition_point(|offset| *offset <= index) - 1;
         (insertion, index - self.offsets[insertion])
     }
 
-    fn graph_at(&self, py: Python<'_>, index: usize) -> PyResult<GraphBuildResult> {
+    fn graph_at(&self, py: Python<'_>, index: usize) -> PyResult<PyObject> {
         let (dataset_index, local_index) = self.dataset_for_index(index);
         self.datasets[dataset_index].graph_at(py, local_index)
     }
@@ -902,7 +908,11 @@ impl PyHDF5GraphDatasetCollection {
         Self::from_paths(paths, r_max, atomic_numbers, niggli_reduce)
     }
 
-    fn close(&mut self) {}
+    fn close(&mut self) {
+        for dataset in &mut self.datasets {
+            dataset.close();
+        }
+    }
 
     fn __len__(&self) -> usize {
         self.length
@@ -910,7 +920,7 @@ impl PyHDF5GraphDatasetCollection {
 
     fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<PyObject> {
         let index = self.normalized_index(index)?;
-        self.graph_at(py, index).map(|result| result.graph)
+        self.graph_at(py, index)
     }
 }
 
@@ -1067,80 +1077,395 @@ impl PyHDF5GraphLoader {
         }
 
         let dataset = self.dataset.bind(py).borrow();
-        let mut graphs = Vec::with_capacity(end - self.cursor);
-        for position in self.cursor..end {
+        let graphs = (self.cursor..end).map(|position| {
             let index = if self.shuffle {
                 self.indices[position]
             } else {
                 position
             };
-            graphs.push(dataset.graph_at(py, index)?);
-        }
+            let (dataset_index, local_index) = dataset.dataset_for_index(index);
+            dataset.datasets[dataset_index].prepare_graph(py, local_index)
+        });
+        let result = pack_dynamic_batches(py, graphs, self.max_nodes, self.max_edges, self.drop)?;
         self.cursor = end;
-        pack_dynamic_batches(py, graphs, self.max_nodes, self.max_edges, self.drop).map(Some)
+        Ok(Some(result))
     }
 }
 
-fn pack_dynamic_batches(
+fn pack_dynamic_batches<I>(
     py: Python<'_>,
-    graphs: Vec<GraphBuildResult>,
+    graphs: I,
     max_nodes: Option<usize>,
     max_edges: Option<usize>,
     drop: bool,
-) -> PyResult<PyObject> {
-    let batch_cls = py.import_bound("torch_geometric.data")?.getattr("Batch")?;
+) -> PyResult<PyObject>
+where
+    I: IntoIterator<Item = PyResult<PreparedGraph>>,
+{
+    let (dtype, _) = torch_default_dtype(py)?;
+    if dtype.str()?.to_str()? == "torch.float32" {
+        pack_dynamic_batches_typed::<f32, I>(py, graphs, max_nodes, max_edges, drop, &dtype)
+    } else {
+        pack_dynamic_batches_typed::<f64, I>(py, graphs, max_nodes, max_edges, drop, &dtype)
+    }
+}
+
+fn pack_dynamic_batches_typed<T: BatchFloat, I>(
+    py: Python<'_>,
+    graphs: I,
+    max_nodes: Option<usize>,
+    max_edges: Option<usize>,
+    drop: bool,
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<PyObject>
+where
+    I: IntoIterator<Item = PyResult<PreparedGraph>>,
+{
     let batches = PyList::empty_bound(py);
-    let mut current_batch = Vec::new();
-    let mut current_node_sum = 0_usize;
-    let mut current_edge_sum = 0_usize;
-
-    for item in graphs {
-        if max_edges.is_some_and(|limit| drop && item.num_edges > limit) {
+    let graphs = graphs.into_iter();
+    let estimated_count = graphs.size_hint().0;
+    let mut current: Option<BatchBuffers<T>> = None;
+    for graph in graphs {
+        let graph = graph?;
+        let n = graph.num_nodes();
+        let e = graph.num_edges();
+        if drop
+            && (max_nodes.is_some_and(|limit| n > limit)
+                || max_edges.is_some_and(|limit| e > limit))
+        {
             continue;
         }
-        if max_nodes.is_some_and(|limit| drop && item.num_nodes > limit) {
-            continue;
+        if current.as_ref().is_some_and(|b| {
+            max_nodes.is_some_and(|limit| b.atomic_numbers.len() + n > limit)
+                || max_edges.is_some_and(|limit| b.receivers.len() + e > limit)
+        }) {
+            batches.append(finish_graph_buffers(
+                py,
+                current.take().unwrap(),
+                true,
+                dtype,
+            )?)?;
         }
-
-        if !current_batch.is_empty() {
-            if max_nodes.is_some_and(|limit| current_node_sum + item.num_nodes > limit) {
-                append_pyg_batch(py, &batch_cls, &batches, &mut current_batch)?;
-                current_node_sum = 0;
-                current_edge_sum = 0;
-            }
-            if max_edges.is_some_and(|limit| current_edge_sum + item.num_edges > limit) {
-                append_pyg_batch(py, &batch_cls, &batches, &mut current_batch)?;
-                current_node_sum = 0;
-                current_edge_sum = 0;
-            }
-        }
-
-        current_node_sum += item.num_nodes;
-        current_edge_sum += item.num_edges;
-        current_batch.push(item.graph);
+        let buffers = current.get_or_insert_with(|| {
+            let count = estimated_count.max(1);
+            let count = max_nodes.map_or(count, |limit| count.min((limit / n.max(1)).max(1)));
+            let count = max_edges.map_or(count, |limit| count.min((limit / e.max(1)).max(1)));
+            BatchBuffers::new(
+                graph.species_count,
+                count,
+                n.saturating_mul(count),
+                e.saturating_mul(count),
+            )
+        });
+        buffers.append(graph);
     }
-
-    if !current_batch.is_empty() {
-        append_pyg_batch(py, &batch_cls, &batches, &mut current_batch)?;
+    if let Some(buffers) = current {
+        batches.append(finish_graph_buffers(py, buffers, true, dtype)?)?;
     }
-
     Ok(batches.into_py(py))
 }
 
-fn append_pyg_batch(
+// Batch assembly is specific to the graph schema, avoiding generic Python
+// collation and per-structure torch objects. Slice/inc metadata retains PyG
+// indexing, get_example(), and to_data_list() compatibility.
+fn materialize_graphs(
     py: Python<'_>,
-    batch_cls: &Bound<'_, PyAny>,
-    batches: &Bound<'_, PyList>,
-    current_batch: &mut Vec<PyObject>,
-) -> PyResult<()> {
-    let data_list = PyList::empty_bound(py);
-    for graph in current_batch.iter() {
-        data_list.append(graph.bind(py))?;
+    graphs: Vec<PreparedGraph>,
+    batch: bool,
+) -> PyResult<PyObject> {
+    let (dtype, _) = torch_default_dtype(py)?;
+    if dtype.str()?.to_str()? == "torch.float32" {
+        materialize_graphs_typed::<f32>(py, graphs, batch, &dtype)
+    } else {
+        materialize_graphs_typed::<f64>(py, graphs, batch, &dtype)
     }
-    let batch = batch_cls.getattr("from_data_list")?.call1((data_list,))?;
-    batches.append(batch)?;
-    current_batch.clear();
-    Ok(())
+}
+
+trait BatchFloat: rtorch_core::TensorElement + Send + Copy + 'static {
+    const DTYPE: &'static str;
+    fn from_f64(value: f64) -> Self;
+}
+impl BatchFloat for f32 {
+    const DTYPE: &'static str = "torch.float32";
+    fn from_f64(value: f64) -> Self {
+        value as f32
+    }
+}
+impl BatchFloat for f64 {
+    const DTYPE: &'static str = "torch.float64";
+    fn from_f64(value: f64) -> Self {
+        value
+    }
+}
+fn batch_float_tensor<T: BatchFloat>(
+    py: Python<'_>,
+    values: Vec<T>,
+    shape: &[usize],
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let tensor = RtTensor::from_vec(values, shape).map_err(to_py_err)?;
+    if dtype.str()?.to_str()? == T::DTYPE {
+        rt_to_torch(py, &tensor)
+    } else {
+        rt_to_torch_dtype(py, &tensor, dtype)
+    }
+}
+
+struct BatchBuffers<T> {
+    species_count: usize,
+    single_energy: f64,
+    single_volume: f64,
+    positions: Vec<T>,
+    forces: Vec<T>,
+    atomic_numbers: Vec<i64>,
+    node_attrs: Vec<T>,
+    cell: Vec<T>,
+    volume: Vec<T>,
+    energy: Vec<T>,
+    stress: Vec<T>,
+    pbc: Vec<bool>,
+    indices: Vec<i64>,
+    natoms: Vec<i64>,
+    senders: Vec<i64>,
+    receivers: Vec<i64>,
+    shifts: Vec<T>,
+    unit_shifts: Vec<T>,
+    assignment: Vec<i64>,
+    node_slices: Vec<i64>,
+    edge_slices: Vec<i64>,
+}
+
+impl<T: BatchFloat> BatchBuffers<T> {
+    fn new(species_count: usize, count: usize, nodes: usize, edges: usize) -> Self {
+        Self {
+            species_count,
+            single_energy: 0.0,
+            single_volume: 0.0,
+            positions: Vec::with_capacity(nodes * 3),
+            forces: Vec::with_capacity(nodes * 3),
+            atomic_numbers: Vec::with_capacity(nodes),
+            node_attrs: Vec::with_capacity(nodes * species_count),
+            cell: Vec::with_capacity(count * 9),
+            volume: Vec::with_capacity(count),
+            energy: Vec::with_capacity(count),
+            stress: Vec::with_capacity(count * 9),
+            pbc: Vec::with_capacity(count * 3),
+            indices: Vec::with_capacity(count),
+            natoms: Vec::with_capacity(count),
+            senders: Vec::with_capacity(edges * 2),
+            receivers: Vec::with_capacity(edges),
+            shifts: Vec::with_capacity(edges * 3),
+            unit_shifts: Vec::with_capacity(edges * 3),
+            assignment: Vec::with_capacity(nodes),
+            node_slices: vec![0],
+            edge_slices: vec![0],
+        }
+    }
+    fn append(&mut self, graph: PreparedGraph) {
+        let n = graph.num_nodes();
+        let e = graph.num_edges();
+        let offset = *self.node_slices.last().unwrap();
+        self.node_attrs
+            .resize((offset as usize + n) * self.species_count, T::from_f64(0.0));
+        if self.indices.is_empty() {
+            self.single_energy = graph.entry.energy;
+            self.single_volume = determinant(&graph.entry.cell).abs();
+        }
+        self.positions
+            .extend(graph.positions.iter().map(|v| T::from_f64(*v)));
+        self.forces
+            .extend(graph.forces.iter().map(|v| T::from_f64(*v)));
+        self.atomic_numbers.extend_from_slice(&graph.atomic_numbers);
+        for (atom, species) in graph.species.iter().enumerate() {
+            self.node_attrs[(offset as usize + atom) * self.species_count + species] =
+                T::from_f64(1.0);
+        }
+        self.cell
+            .extend(graph.neighborhood.cell.iter().map(|v| T::from_f64(*v)));
+        self.volume
+            .push(T::from_f64(determinant(&graph.entry.cell).abs()));
+        self.energy.push(T::from_f64(graph.entry.energy));
+        self.stress
+            .extend(voigt_to_matrix(graph.entry.stress).map(T::from_f64));
+        self.pbc.extend_from_slice(&graph.entry.pbc);
+        self.indices.push(graph.index as i64);
+        self.natoms.push(n as i64);
+        self.senders.extend(
+            graph.neighborhood.edge_index[..e]
+                .iter()
+                .map(|v| v + offset),
+        );
+        self.receivers.extend(
+            graph.neighborhood.edge_index[e..]
+                .iter()
+                .map(|v| v + offset),
+        );
+        self.shifts
+            .extend(graph.neighborhood.shifts.iter().map(|v| T::from_f64(*v)));
+        self.unit_shifts.extend(
+            graph
+                .neighborhood
+                .unit_shifts
+                .iter()
+                .map(|v| T::from_f64(*v)),
+        );
+        self.assignment
+            .extend(std::iter::repeat_n(self.indices.len() as i64 - 1, n));
+        self.node_slices.push(offset + n as i64);
+        self.edge_slices
+            .push(self.edge_slices.last().unwrap() + e as i64);
+    }
+}
+
+fn materialize_graphs_typed<T: BatchFloat>(
+    py: Python<'_>,
+    graphs: Vec<PreparedGraph>,
+    batch: bool,
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let count = graphs.len();
+    let nodes = graphs.iter().map(PreparedGraph::num_nodes).sum();
+    let edges = graphs.iter().map(PreparedGraph::num_edges).sum();
+    let mut buffers = BatchBuffers::<T>::new(graphs[0].species_count, count, nodes, edges);
+    for graph in graphs {
+        buffers.append(graph);
+    }
+    finish_graph_buffers(py, buffers, batch, dtype)
+}
+
+fn finish_graph_buffers<T: BatchFloat>(
+    py: Python<'_>,
+    buffers: BatchBuffers<T>,
+    batch: bool,
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let count = buffers.indices.len();
+    let nodes = buffers.atomic_numbers.len();
+    let edges = buffers.receivers.len();
+    let BatchBuffers {
+        species_count,
+        single_energy,
+        single_volume,
+        positions,
+        forces,
+        atomic_numbers,
+        node_attrs,
+        cell,
+        volume,
+        energy,
+        stress,
+        pbc,
+        indices,
+        natoms,
+        mut senders,
+        receivers,
+        shifts,
+        unit_shifts,
+        assignment,
+        node_slices,
+        edge_slices,
+    } = buffers;
+    senders.extend(receivers);
+    let kwargs = PyDict::new_bound(py);
+    let pos = batch_float_tensor(py, positions, &[nodes, 3], dtype)?;
+    kwargs.set_item("pos", pos.clone_ref(py))?;
+    kwargs.set_item("positions", pos)?;
+    kwargs.set_item("force", batch_float_tensor(py, forces, &[nodes, 3], dtype)?)?;
+    kwargs.set_item(
+        "node_attrs",
+        batch_float_tensor(py, node_attrs, &[nodes, species_count], dtype)?,
+    )?;
+    kwargs.set_item("atomic_numbers", i64_tensor(py, atomic_numbers, &[nodes])?)?;
+    kwargs.set_item(
+        "tags",
+        batch_float_tensor(py, vec![T::from_f64(0.0); nodes], &[nodes], dtype)?,
+    )?;
+    kwargs.set_item(
+        "cell",
+        batch_float_tensor(py, cell, &[count * 3, 3], dtype)?,
+    )?;
+    kwargs.set_item("edge_index", i64_tensor(py, senders, &[2, edges])?)?;
+    kwargs.set_item(
+        "shifts",
+        batch_float_tensor(py, shifts, &[edges, 3], dtype)?,
+    )?;
+    kwargs.set_item(
+        "unit_shifts",
+        batch_float_tensor(py, unit_shifts, &[edges, 3], dtype)?,
+    )?;
+    kwargs.set_item(
+        "stress",
+        batch_float_tensor(py, stress, &[count, 3, 3], dtype)?,
+    )?;
+    kwargs.set_item("pbc", bool_tensor(py, pbc, &[count * 3])?)?;
+    let module = py.import_bound("torch_geometric.data")?;
+    if !batch {
+        kwargs.set_item("cell_volume", single_volume)?;
+        kwargs.set_item("y", scalar_float_tensor(py, single_energy, dtype)?)?;
+        kwargs.set_item("natoms", nodes)?;
+        kwargs.set_item("idx", indices[0])?;
+        return Ok(module.getattr("Data")?.call((), Some(&kwargs))?.into_py(py));
+    }
+    kwargs.set_item(
+        "cell_volume",
+        batch_float_tensor(py, volume, &[count], dtype)?,
+    )?;
+    kwargs.set_item("y", batch_float_tensor(py, energy, &[count], dtype)?)?;
+    kwargs.set_item("natoms", i64_tensor(py, natoms, &[count])?)?;
+    kwargs.set_item("idx", i64_tensor(py, indices, &[count])?)?;
+    kwargs.set_item("batch", i64_tensor(py, assignment, &[nodes])?)?;
+    let ptr = i64_tensor(py, node_slices.clone(), &[count + 1])?;
+    kwargs.set_item("ptr", ptr.clone_ref(py))?;
+    let slices = PyDict::new_bound(py);
+    let incs = PyDict::new_bound(py);
+    let scalar_slices = i64_tensor(py, (0..=count as i64).collect::<Vec<_>>(), &[count + 1])?;
+    let triple_slices = i64_tensor(
+        py,
+        (0..=count as i64).map(|i| 3 * i).collect::<Vec<_>>(),
+        &[count + 1],
+    )?;
+    let edge_ptr = i64_tensor(py, edge_slices, &[count + 1])?;
+    let zero_incs = i64_tensor(py, vec![0; count], &[count])?;
+    for key in [
+        "pos",
+        "positions",
+        "force",
+        "node_attrs",
+        "atomic_numbers",
+        "tags",
+    ] {
+        slices.set_item(key, ptr.clone_ref(py))?;
+        incs.set_item(key, zero_incs.clone_ref(py))?;
+    }
+    for key in ["shifts", "unit_shifts", "edge_index"] {
+        slices.set_item(key, edge_ptr.clone_ref(py))?;
+        incs.set_item(key, zero_incs.clone_ref(py))?;
+    }
+    for key in ["cell", "pbc"] {
+        slices.set_item(key, triple_slices.clone_ref(py))?;
+        incs.set_item(key, zero_incs.clone_ref(py))?;
+    }
+    for key in ["cell_volume", "y", "natoms", "idx", "stress"] {
+        slices.set_item(key, scalar_slices.clone_ref(py))?;
+        incs.set_item(key, zero_incs.clone_ref(py))?;
+    }
+    incs.set_item(
+        "edge_index",
+        i64_tensor(py, node_slices[..count].to_vec(), &[count])?,
+    )?;
+    let batch_cls = DATA_BATCH_CLASS
+        .get_or_try_init(py, || -> PyResult<PyObject> {
+            Ok(module.getattr("Batch")?.call0()?.get_type().into_py(py))
+        })?
+        .bind(py);
+    // Reuse PyG's resolved DataBatch class without repeating dynamic class
+    // selection and inspect.signature() for every batch.
+    let out = batch_cls.call_method1("__new__", (batch_cls,))?;
+    out.call_method("__init__", (), Some(&kwargs))?;
+    out.setattr("_num_graphs", count)?;
+    out.setattr("_slice_dict", slices)?;
+    out.setattr("_inc_dict", incs)?;
+    Ok(out.into_py(py))
 }
 
 fn shuffle_indices(indices: &mut [usize], seed: Option<u64>) {

@@ -5,6 +5,7 @@ use std::ffi::c_char;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
 
 mod graph;
 
@@ -15,6 +16,7 @@ use rtorch_core::{
 };
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
+static FROM_DLPACK: GILOnceCell<PyObject> = GILOnceCell::new();
 
 pub(crate) fn to_py_err(err: RtError) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
@@ -46,11 +48,13 @@ pub(crate) fn tensor_to_torch(py: Python<'_>, tensor: &RtTensor) -> PyResult<PyO
     }
 
     let capsule = unsafe { PyObject::from_owned_ptr(py, capsule) };
-    let dlpack = py
-        .import_bound("torch")?
-        .getattr("utils")?
-        .getattr("dlpack")?;
-    let torch_tensor = dlpack.call_method1("from_dlpack", (capsule,))?;
+    let from_dlpack = FROM_DLPACK.get_or_try_init(py, || -> PyResult<PyObject> {
+        Ok(py
+            .import_bound("torch.utils.dlpack")?
+            .getattr("from_dlpack")?
+            .into_py(py))
+    })?;
+    let torch_tensor = from_dlpack.bind(py).call1((capsule,))?;
     Ok(torch_tensor.into_py(py))
 }
 

@@ -240,6 +240,16 @@ struct Hdf5DatasetState {
   std::string dataset_name;
   Hdf5Handle file;
   Hdf5Handle dataset;
+  // Layout is immutable; data read-ahead is bounded and never modified after
+  // publishing tensor views. Replacing the cache keeps retained views valid.
+  bool layout_initialized = false;
+  std::vector<hsize_t> dimensions;
+  H5T_class_t type_class = H5T_NO_CLASS;
+  size_t type_size = 0;
+  H5T_sign_t type_sign = H5T_SGN_ERROR;
+  torch::Tensor read_cache;
+  uint64_t cache_offset = 0;
+  uint64_t previous_end = UINT64_MAX;
 };
 
 struct Hdf5StructureSpan {
@@ -271,7 +281,24 @@ std::string resolve_hdf5_dataset_name(hid_t file, const std::string& requested) 
 }
 
 Hdf5Handle open_hdf5_file(const fs::path& path) {
-  auto file = H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  Hdf5Handle access(H5Pcreate(H5P_FILE_ACCESS), H5Pclose);
+  H5AC_cache_config_t metadata{};
+  metadata.version = H5AC__CURR_CACHE_CONFIG_VERSION;
+  if (access.id < 0 || H5Pget_mdc_config(access, &metadata) < 0) {
+    throw std::runtime_error("failed to inspect HDF5 cache configuration");
+  }
+  // Metadata caches can otherwise grow substantially during shuffled epochs.
+  // Atom read-ahead has its own bounded buffers, so raw chunk caches need only
+  // cover a few adjacent chunks rather than duplicating megabytes per field.
+  metadata.set_initial_size = true;
+  metadata.initial_size = 2 * 1024 * 1024;
+  metadata.min_size = 1024 * 1024;
+  metadata.max_size = 8 * 1024 * 1024;
+  if (H5Pset_mdc_config(access, &metadata) < 0 ||
+      H5Pset_cache(access, 0, 521, 256 * 1024, 0.75) < 0) {
+    throw std::runtime_error("failed to configure bounded HDF5 caches");
+  }
+  auto file = H5Fopen(path.string().c_str(), H5F_ACC_RDONLY, access);
   if (file < 0) {
     throw std::runtime_error("failed to open HDF5 file: " + path.string());
   }
@@ -399,18 +426,48 @@ torch::Tensor read_hdf5_values(
     hid_t native_type,
     c10::ScalarType torch_type,
     const SampleRecord& sample) {
-  auto file_dims = hdf5_dataset_dims(dataset);
+  auto& state = *sample.hdf5_state;
+  const auto& file_dims = state.dimensions;
   if (sample.hdf5_has_slice && file_dims.empty()) {
     throw std::runtime_error("cannot slice a scalar HDF5 dataset");
   }
 
+  SampleRecord selection = sample;
+  if (sample.hdf5_has_slice) {
+    const auto offset = sample.hdf5_offset;
+    const auto length = sample.hdf5_length;
+    if (offset > file_dims[0] || length > file_dims[0] - offset) {
+      throw std::runtime_error("HDF5 slice exceeds dataset bounds");
+    }
+    if (state.read_cache.defined() && offset >= state.cache_offset &&
+        offset - state.cache_offset <= static_cast<uint64_t>(state.read_cache.size(0)) &&
+        length <= static_cast<uint64_t>(state.read_cache.size(0)) - (offset - state.cache_offset)) {
+      state.previous_end = offset + length;
+      // Public samples are mutable and independently owned. Never expose the
+      // cache itself: modifying one sample must not change a later file read.
+      return state.read_cache.narrow(0, offset - state.cache_offset, length).clone();
+    }
+    // Activate read-ahead only on adjacent accesses. Random sampling therefore
+    // does not turn tiny structures into large, unnecessary reads.
+    if (length > 0 && state.previous_end == offset) {
+      std::vector<hsize_t> row_dims(file_dims.begin() + 1, file_dims.end());
+      const auto row_elements = hdf5_element_count(row_dims);
+      constexpr size_t max_cache_bytes = 256 * 1024;
+      const auto max_rows = row_elements == 0 || row_elements > max_cache_bytes / sizeof(T)
+          ? size_t{0} : max_cache_bytes / (row_elements * sizeof(T));
+      const auto rows = std::min(size_t{4096}, max_rows);
+      if (length < rows) {
+        selection.hdf5_length = std::min<uint64_t>(rows, file_dims[0] - offset);
+      }
+    }
+  }
   std::vector<hsize_t> read_dims = file_dims;
   Hdf5Handle file_space(H5Dget_space(dataset), H5Sclose);
   Hdf5Handle memory_space;
 
   if (sample.hdf5_has_slice) {
-    const auto offset = static_cast<hsize_t>(sample.hdf5_offset);
-    const auto length = static_cast<hsize_t>(sample.hdf5_length);
+    const auto offset = static_cast<hsize_t>(selection.hdf5_offset);
+    const auto length = static_cast<hsize_t>(selection.hdf5_length);
     if (offset > file_dims[0] || length > file_dims[0] - offset) {
       throw std::runtime_error("HDF5 slice exceeds dataset bounds");
     }
@@ -440,19 +497,23 @@ torch::Tensor read_hdf5_values(
   }
 
   auto shape = hdf5_torch_shape(read_dims);
-  auto count = hdf5_element_count(read_dims);
-  std::vector<T> values(count);
+  hdf5_element_count(read_dims); // Validate element count before allocation.
+  auto values = torch::empty(shape, torch::TensorOptions().dtype(torch_type));
   auto memory_id = sample.hdf5_has_slice ? memory_space.id : H5S_ALL;
   auto file_id = sample.hdf5_has_slice ? file_space.id : H5S_ALL;
-  if (H5Dread(dataset, native_type, memory_id, file_id, H5P_DEFAULT, values.data()) < 0) {
+  if (H5Dread(dataset, native_type, memory_id, file_id, H5P_DEFAULT, values.data_ptr<T>()) < 0) {
     throw std::runtime_error("failed to read HDF5 tensor data");
   }
 
-  return torch::from_blob(
-             values.data(),
-             shape,
-             torch::TensorOptions().dtype(torch_type))
-      .clone();
+  if (sample.hdf5_has_slice) {
+    state.previous_end = sample.hdf5_offset + sample.hdf5_length;
+    if (selection.hdf5_length > sample.hdf5_length) {
+      state.read_cache = values;
+      state.cache_offset = sample.hdf5_offset;
+      return values.narrow(0, 0, sample.hdf5_length).clone();
+    }
+  }
+  return values;
 }
 
 torch::Tensor read_hdf5_tensor(const SampleRecord& sample) {
@@ -462,12 +523,22 @@ torch::Tensor read_hdf5_tensor(const SampleRecord& sample) {
   const auto dataset = sample.hdf5_state->dataset.id;
   const auto& dataset_name = sample.hdf5_state->dataset_name;
 
-  Hdf5Handle type(H5Dget_type(dataset), H5Tclose);
-  if (type.id < 0) {
-    throw std::runtime_error("failed to inspect HDF5 dataset type: " + dataset_name);
+  auto& state = *sample.hdf5_state;
+  if (!state.layout_initialized) {
+    Hdf5Handle type(H5Dget_type(dataset), H5Tclose);
+    if (type.id < 0) {
+      throw std::runtime_error("failed to inspect HDF5 dataset type: " + dataset_name);
+    }
+    state.dimensions = hdf5_dataset_dims(dataset);
+    state.type_class = H5Tget_class(type);
+    state.type_size = H5Tget_size(type);
+    if (state.type_class == H5T_INTEGER) {
+      state.type_sign = H5Tget_sign(type);
+    }
+    state.layout_initialized = true;
   }
-  const auto type_class = H5Tget_class(type);
-  const auto size = H5Tget_size(type);
+  const auto type_class = state.type_class;
+  const auto size = state.type_size;
   if (type_class == H5T_FLOAT) {
     if (size <= sizeof(float)) {
       return read_hdf5_values<float>(dataset, H5T_NATIVE_FLOAT, torch::kFloat32, sample);
@@ -476,7 +547,7 @@ torch::Tensor read_hdf5_tensor(const SampleRecord& sample) {
   }
 
   if (type_class == H5T_INTEGER) {
-    const auto sign = H5Tget_sign(type);
+    const auto sign = state.type_sign;
     if (sign == H5T_SGN_NONE) {
       if (size == sizeof(uint8_t)) {
         return read_hdf5_values<uint8_t>(dataset, H5T_NATIVE_UCHAR, torch::kUInt8, sample);
@@ -1151,6 +1222,29 @@ extern "C" RtTensor* rt_tensor_from_data(
   }, nullptr);
 }
 
+extern "C" RtTensor* rt_tensor_from_owned_data(
+    void* data, size_t len, int scalar_type,
+    const int64_t* shape, size_t shape_len,
+    void* owner, void (*release_owner)(void*)) {
+  std::unique_ptr<void, void (*)(void*)> guard(owner, release_owner);
+  return protect<RtTensor*>([&]() {
+    const auto dimensions = copy_shape(shape, shape_len);
+    if (shape_numel(dimensions) != len || (len > 0 && data == nullptr)) {
+      throw std::runtime_error("invalid owned tensor data or shape");
+    }
+    const auto options = torch::TensorOptions().dtype(scalar_type_from_ffi(scalar_type));
+    auto result = std::make_unique<RtTensor>();
+    if (len == 0) {
+      result->inner = torch::empty(dimensions, options);
+    } else {
+      std::shared_ptr<void> storage(std::move(guard));
+      result->inner = torch::from_blob(data, dimensions,
+          [storage = std::move(storage)](void*) {}, options);
+    }
+    return result.release();
+  }, nullptr);
+}
+
 extern "C" RtTensor* rt_tensor_zeros(
     const int64_t* shape,
     size_t shape_len,
@@ -1566,6 +1660,28 @@ extern "C" RtOwnedBatch* rt_tensor_dataset_get(
       tensor = pipeline->inner.apply(tensor);
     }
     return make_owned_batch(tensor, std::vector<int64_t>{sample.label}).release();
+  }, nullptr);
+}
+
+extern "C" RtTensor* rt_tensor_dataset_read_hdf5_slice(
+    const RtTensorDataset* dataset, uint64_t offset, uint64_t length) {
+  return protect<RtTensor*>([&]() {
+#ifdef RTORCH_WITH_HDF5
+    if (dataset == nullptr || dataset->inner.direct_hdf5 == nullptr) {
+      throw std::runtime_error("expected an HDF5 tensor dataset");
+    }
+    SampleRecord sample;
+    sample.hdf5_state = dataset->inner.direct_hdf5->state;
+    sample.hdf5_offset = offset;
+    sample.hdf5_length = length;
+    sample.hdf5_has_slice = true;
+    auto result = std::make_unique<RtTensor>();
+    result->inner = read_hdf5_tensor(sample);
+    return result.release();
+#else
+    throw std::runtime_error("RTorch was built without HDF5 support");
+    return static_cast<RtTensor*>(nullptr);
+#endif
   }, nullptr);
 }
 

@@ -234,6 +234,44 @@ impl Tensor {
         })
     }
 
+    /// Transfer a vector into tensor storage without copying its elements.
+    /// LibTorch/DLPack views keep the allocation alive until their last owner
+    /// is dropped. Storage cannot be resized by LibTorch.
+    pub fn from_vec<T: TensorElement + Send + 'static>(
+        mut values: Vec<T>,
+        shape: &[usize],
+    ) -> Result<Self, Error> {
+        let (raw_shape, expected) = checked_shape(shape)?;
+        if expected != values.len() {
+            return Err(Error::ShapeElementMismatch {
+                expected,
+                actual: values.len(),
+            });
+        }
+        // Builders grow geometrically while streaming. Do not retain unused
+        // capacity for the lifetime of a returned tensor or DLPack view.
+        values.shrink_to_fit();
+        unsafe extern "C" fn release<T>(owner: *mut c_void) {
+            // The backend calls this exactly once, including on construction errors.
+            drop(unsafe { Box::from_raw(owner.cast::<Vec<T>>()) });
+        }
+        let mut owner = Box::new(values);
+        let data = owner.as_mut_ptr().cast();
+        let len = owner.len();
+        let owner = Box::into_raw(owner).cast();
+        Self::from_raw(unsafe {
+            sys::rt_tensor_from_owned_data(
+                data,
+                len,
+                T::SCALAR_TYPE,
+                raw_shape.as_ptr(),
+                raw_shape.len(),
+                owner,
+                release::<T>,
+            )
+        })
+    }
+
     pub fn zeros(
         shape: &[usize],
         scalar_type: ScalarType,
@@ -523,6 +561,14 @@ impl TensorDataset {
 
     pub fn get(&self, index: usize) -> Result<Sample, Error> {
         self.get_inner(index, None)
+    }
+
+    /// Read an atom span directly when its offset/length is already known.
+    /// Avoids re-reading the structures table separately for each atom field.
+    pub fn read_hdf5_slice(&self, offset: u64, length: u64) -> Result<Tensor, Error> {
+        Tensor::from_raw(unsafe {
+            sys::rt_tensor_dataset_read_hdf5_slice(self.raw, offset, length)
+        })
     }
 
     pub fn get_with_transform(
@@ -1145,6 +1191,18 @@ mod tests {
     #[test]
     fn rejects_empty_statistics_input() {
         assert!(statistics::<f32>(&[]).is_err());
+    }
+
+    #[test]
+    fn transferred_vector_storage_survives_reshape_and_owner_drop() {
+        let tensor = Tensor::from_vec(vec![1.0_f64, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let view = tensor.reshape(&[4]).unwrap();
+        drop(tensor);
+        assert_eq!(view.to_vec_f64().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(Tensor::from_vec(vec![1_i64], &[2]).is_err());
+        let empty = Tensor::from_vec(Vec::<f32>::new(), &[0, 3]).unwrap();
+        assert_eq!(empty.shape().unwrap(), vec![0, 3]);
+        assert_eq!(empty.numel(), 0);
     }
 
     #[test]
