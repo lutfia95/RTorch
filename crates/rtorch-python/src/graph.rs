@@ -368,7 +368,8 @@ fn edge_record(
     let dist2 = displacement[0] * displacement[0]
         + displacement[1] * displacement[1]
         + displacement[2] * displacement[2];
-    if dist2 > prepared.cutoff2 {
+    // Match the Python/matscipy neighbor list's strict cutoff.
+    if dist2 >= prepared.cutoff2 {
         return Ok(None);
     }
 
@@ -1221,6 +1222,14 @@ struct BatchBuffers<T> {
     node_attrs: Vec<T>,
     cell: Vec<T>,
     volume: Vec<T>,
+    signed_volume: Vec<T>,
+    rcell: Vec<T>,
+    total_charge: Vec<T>,
+    total_spin: Vec<T>,
+    external_field: Vec<T>,
+    source_id: Vec<i64>,
+    reaction_id: Vec<i64>,
+    state_id: Vec<i64>,
     energy: Vec<T>,
     stress: Vec<T>,
     pbc: Vec<bool>,
@@ -1247,6 +1256,14 @@ impl<T: BatchFloat> BatchBuffers<T> {
             node_attrs: Vec::with_capacity(nodes * species_count),
             cell: Vec::with_capacity(count * 9),
             volume: Vec::with_capacity(count),
+            signed_volume: Vec::with_capacity(count),
+            rcell: Vec::with_capacity(count * 9),
+            total_charge: Vec::with_capacity(count),
+            total_spin: Vec::with_capacity(count),
+            external_field: Vec::with_capacity(count * 3),
+            source_id: Vec::with_capacity(count),
+            reaction_id: Vec::with_capacity(count),
+            state_id: Vec::with_capacity(count),
             energy: Vec::with_capacity(count),
             stress: Vec::with_capacity(count * 9),
             pbc: Vec::with_capacity(count * 3),
@@ -1284,6 +1301,23 @@ impl<T: BatchFloat> BatchBuffers<T> {
             .extend(graph.neighborhood.cell.iter().map(|v| T::from_f64(*v)));
         self.volume
             .push(T::from_f64(determinant(&graph.entry.cell).abs()));
+        let signed_volume = determinant(&graph.entry.cell);
+        self.signed_volume.push(T::from_f64(signed_volume));
+        let reciprocal = if signed_volume.abs() <= 1e-10 {
+            [0.0; 9]
+        } else {
+            let inv = inverse(&graph.entry.cell).unwrap();
+            std::array::from_fn(|i| 2.0 * std::f64::consts::PI * inv[3 * (i % 3) + i / 3])
+        };
+        self.rcell.extend(reciprocal.map(T::from_f64));
+        self.total_charge
+            .push(T::from_f64(graph.entry.total_charge));
+        self.total_spin.push(T::from_f64(graph.entry.total_spin));
+        self.external_field
+            .extend(graph.entry.external_field.map(T::from_f64));
+        self.source_id.push(graph.entry.source_id as i64);
+        self.reaction_id.push(graph.entry.reaction_id);
+        self.state_id.push(graph.entry.state_id as i64);
         self.energy.push(T::from_f64(graph.entry.energy));
         self.stress
             .extend(voigt_to_matrix(graph.entry.stress).map(T::from_f64));
@@ -1352,6 +1386,14 @@ fn finish_graph_buffers<T: BatchFloat>(
         node_attrs,
         cell,
         volume,
+        signed_volume,
+        rcell,
+        total_charge,
+        total_spin,
+        external_field,
+        source_id,
+        reaction_id,
+        state_id,
         energy,
         stress,
         pbc,
@@ -1398,6 +1440,30 @@ fn finish_graph_buffers<T: BatchFloat>(
         batch_float_tensor(py, stress, &[count, 3, 3], dtype)?,
     )?;
     kwargs.set_item("pbc", bool_tensor(py, pbc, &[count * 3])?)?;
+    let scalar_shape: &[usize] = if batch { &[count] } else { &[] };
+    for (key, values) in [
+        ("volume", signed_volume),
+        ("total_charge", total_charge),
+        ("total_spin", total_spin),
+        ("fermi_level", vec![T::from_f64(0.0); count]),
+    ] {
+        kwargs.set_item(key, batch_float_tensor(py, values, scalar_shape, dtype)?)?;
+    }
+    for (key, values) in [
+        ("source_id", source_id),
+        ("reaction_id", reaction_id),
+        ("state_id", state_id),
+    ] {
+        kwargs.set_item(key, i64_tensor(py, values, scalar_shape)?)?;
+    }
+    kwargs.set_item(
+        "external_field",
+        batch_float_tensor(py, external_field, &[count, 3], dtype)?,
+    )?;
+    kwargs.set_item(
+        "rcell",
+        batch_float_tensor(py, rcell, &[count * 3, 3], dtype)?,
+    )?;
     let module = py.import_bound("torch_geometric.data")?;
     if !batch {
         kwargs.set_item("cell_volume", single_volume)?;
@@ -1441,11 +1507,25 @@ fn finish_graph_buffers<T: BatchFloat>(
         slices.set_item(key, edge_ptr.clone_ref(py))?;
         incs.set_item(key, zero_incs.clone_ref(py))?;
     }
-    for key in ["cell", "pbc"] {
+    for key in ["cell", "pbc", "rcell"] {
         slices.set_item(key, triple_slices.clone_ref(py))?;
         incs.set_item(key, zero_incs.clone_ref(py))?;
     }
-    for key in ["cell_volume", "y", "natoms", "idx", "stress"] {
+    for key in [
+        "cell_volume",
+        "y",
+        "natoms",
+        "idx",
+        "stress",
+        "volume",
+        "total_charge",
+        "total_spin",
+        "fermi_level",
+        "external_field",
+        "source_id",
+        "reaction_id",
+        "state_id",
+    ] {
         slices.set_item(key, scalar_slices.clone_ref(py))?;
         incs.set_item(key, zero_incs.clone_ref(py))?;
     }

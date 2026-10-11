@@ -627,6 +627,12 @@ pub struct HDF5GraphStructure {
     pub stress_weight: f32,
     pub virials_weight: f32,
     pub dipole_weight: f32,
+    pub total_charge: f64,
+    pub total_spin: f64,
+    pub external_field: [f64; 3],
+    pub source_id: i32,
+    pub reaction_id: i64,
+    pub state_id: i32,
 }
 
 impl From<sys::RtHdf5GraphStructure> for HDF5GraphStructure {
@@ -645,6 +651,12 @@ impl From<sys::RtHdf5GraphStructure> for HDF5GraphStructure {
             stress_weight: value.stress_weight,
             virials_weight: value.virials_weight,
             dipole_weight: value.dipole_weight,
+            total_charge: value.total_charge,
+            total_spin: value.total_spin,
+            external_field: value.external_field,
+            source_id: value.source_id,
+            reaction_id: value.reaction_id,
+            state_id: value.state_id,
         }
     }
 }

@@ -77,6 +77,12 @@ pub struct RtHdf5GraphStructure {
     pub stress_weight: f32,
     pub virials_weight: f32,
     pub dipole_weight: f32,
+    pub total_charge: f64,
+    pub total_spin: f64,
+    pub external_field: [f64; 3],
+    pub source_id: i32,
+    pub reaction_id: i64,
+    pub state_id: i32,
 }
 
 impl Default for RtHdf5GraphStructure {
@@ -95,6 +101,12 @@ impl Default for RtHdf5GraphStructure {
             stress_weight: 0.0,
             virials_weight: 0.0,
             dipole_weight: 0.0,
+            total_charge: 0.0,
+            total_spin: 1.0,
+            external_field: [0.0; 3],
+            source_id: 0,
+            reaction_id: -1,
+            state_id: -1,
         }
     }
 }

@@ -61,6 +61,12 @@ typedef struct RtHdf5GraphStructure {
   float stress_weight;
   float virials_weight;
   float dipole_weight;
+  double total_charge;
+  double total_spin;
+  double external_field[3];
+  int32_t source_id;
+  int64_t reaction_id;
+  int32_t state_id;
 } RtHdf5GraphStructure;
 
 char* rt_last_error_message(void);

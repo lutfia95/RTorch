@@ -148,12 +148,44 @@ class NativeGraphBatchTest(unittest.TestCase):
                 expected = []
                 for unit in product(*(range(-3, 4) if periodic else [0] for periodic in pbc)):
                     displacement = positions[None, :, :] - positions[:, None, :] + np.array(unit) @ cell
-                    accepted = np.sum(displacement * displacement, axis=-1) <= cutoff * cutoff
+                    accepted = np.sum(displacement * displacement, axis=-1) < cutoff * cutoff
                     if unit == (0, 0, 0):
                         np.fill_diagonal(accepted, False)
                     a, b = np.nonzero(accepted)
                     expected.extend((int(sender), int(receiver), *unit) for sender, receiver in zip(a, b))
                 self.assertEqual(actual, sorted(expected))
+                del dataset
+
+    def test_strict_cutoff_matches_python_neighbor_list(self):
+        try:
+            from matscipy.neighbours import neighbour_list
+        except ImportError:
+            self.skipTest('Optional Python neighbor-list reference is unavailable')
+        with h5py.File(self.fixture) as f:
+            template = f['structures'][:1]
+        cases = [
+            (np.array([[0., 0., 0.], [5. - 1e-12, 0., 0.],
+                       [5., 0., 0.], [5. + 1e-12, 0., 0.]]), np.eye(3) * 20, (False,) * 3),
+            (np.zeros((1, 3)), np.diag([5., 8., 8.]), (True,) * 3),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'cutoff.h5')
+            for positions, cell, pbc in cases:
+                entry = template.copy()
+                entry['offset'] = 0; entry['length'] = len(positions)
+                entry['cell'] = cell; entry['pbc'] = pbc
+                with h5py.File(path, 'w') as f:
+                    f.create_dataset('structures', data=entry)
+                    f.create_dataset('positions', data=positions)
+                    f.create_dataset('forces', data=np.zeros_like(positions))
+                    f.create_dataset('atomic_numbers', data=np.ones(len(positions), dtype=np.int32))
+                dataset = rtorch.HDF5GraphDataset.from_hdf5_file(path, 5., [1])
+                graph = dataset[0]
+                actual = sorted((int(a), int(b), *map(int, unit)) for (a, b), unit in
+                                zip(graph.edge_index.T.tolist(), graph.unit_shifts.tolist()))
+                a, b, units = neighbour_list('ijS', positions=positions, cell=cell, pbc=pbc, cutoff=5.)
+                expected = sorted((int(i), int(j), *map(int, unit)) for i, j, unit in zip(a, b, units))
+                self.assertEqual(actual, expected)
                 del dataset
 
     def test_empty_files_in_dataset_collection(self):
@@ -169,6 +201,44 @@ class NativeGraphBatchTest(unittest.TestCase):
             )
             self.assertEqual([int(i) for outer in loader for batch in outer for i in batch.idx],
                              list(range(length)) * 2)
+
+    def test_optional_metadata_defaults_and_values(self):
+        fields = [('total_charge', 'f8'), ('total_spin', 'f8'), ('external_field', 'f8', (3,)),
+                  ('source_id', 'i4'), ('reaction_id', 'i8'), ('state_id', 'i4')]
+        values = dict(total_charge=3.5, total_spin=2., external_field=[1., 2., 3.],
+                      source_id=9, reaction_id=14_000_000_000, state_id=4)
+        defaults = dict(total_charge=0., total_spin=1., external_field=[0., 0., 0.],
+                        source_id=0, reaction_id=-1, state_id=-1)
+        with h5py.File(self.fixture) as source:
+            original = source['structures'][:1]
+            atoms = {key: source[key][:int(original['length'][0])]
+                     for key in ('positions', 'forces', 'atomic_numbers')}
+        # Exercise absent fields, a partially upgraded schema, and the full schema.
+        base_fields = [d for d in original.dtype.descr if d[0] not in defaults]
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'metadata.h5')
+            for optional in ([], fields[1:2], fields):
+                entries = np.zeros(2, dtype=base_fields + optional)
+                for key in entries.dtype.names:
+                    if key in original.dtype.names:
+                        entries[key] = original[key]
+                entries['offset'] = 0
+                expected = defaults.copy()
+                for field in optional:
+                    key = field[0]
+                    entries[key] = values[key]
+                    expected[key] = values[key]
+                with h5py.File(path, 'w') as f:
+                    f.create_dataset('structures', data=entries)
+                    for key, data in atoms.items():
+                        f.create_dataset(key, data=data)
+                dataset = rtorch.HDF5GraphDataset.from_hdf5_file(path, 5., self.numbers)
+                loader = rtorch.HDF5GraphLoader.from_hdf5_file(path, 5., self.numbers, batch_size=2)
+                graph = dataset[0]
+                for key, value in expected.items():
+                    np.testing.assert_array_equal(np.asarray(graph[key]).reshape(-1), np.asarray(value).reshape(-1))
+                self.assert_batch_equal(next(iter(loader))[0], Batch.from_data_list([dataset[0], dataset[1]]))
+                loader.dataset.close(); dataset.close()
 
 
 if __name__ == '__main__':

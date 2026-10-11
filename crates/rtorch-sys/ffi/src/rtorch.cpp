@@ -360,7 +360,7 @@ Hdf5Handle hdf5_array_type(hid_t base_type, std::initializer_list<hsize_t> dims)
       H5Tclose);
 }
 
-Hdf5Handle make_hdf5_graph_memory_type() {
+Hdf5Handle make_hdf5_graph_memory_type(hid_t dataset) {
   auto cell_type = hdf5_array_type(H5T_NATIVE_DOUBLE, {3, 3});
   auto pbc_type = hdf5_array_type(H5T_NATIVE_HBOOL, {3});
   auto stress_type = hdf5_array_type(H5T_NATIVE_DOUBLE, {6});
@@ -390,6 +390,23 @@ Hdf5Handle make_hdf5_graph_memory_type() {
       H5Tinsert(memory_type, "dipole_weight", HOFFSET(RtHdf5GraphStructure, dipole_weight), H5T_NATIVE_FLOAT) < 0) {
     throw std::runtime_error("failed to create HDF5 graph structures memory type");
   }
+  Hdf5Handle file_type(H5Dget_type(dataset), H5Tclose);
+  if (file_type.id < 0) {
+    throw std::runtime_error("failed to inspect HDF5 graph metadata type");
+  }
+  // Older files lack these fields. Leave their initialized defaults untouched.
+  const auto optional = [&](const char* name, size_t offset, hid_t type) {
+    if (H5Tget_member_index(file_type, name) >= 0 &&
+        H5Tinsert(memory_type, name, offset, type) < 0) {
+      throw std::runtime_error("failed to create optional HDF5 graph metadata type");
+    }
+  };
+  optional("total_charge", HOFFSET(RtHdf5GraphStructure, total_charge), H5T_NATIVE_DOUBLE);
+  optional("total_spin", HOFFSET(RtHdf5GraphStructure, total_spin), H5T_NATIVE_DOUBLE);
+  optional("external_field", HOFFSET(RtHdf5GraphStructure, external_field), dipole_type);
+  optional("source_id", HOFFSET(RtHdf5GraphStructure, source_id), H5T_NATIVE_INT32);
+  optional("reaction_id", HOFFSET(RtHdf5GraphStructure, reaction_id), H5T_NATIVE_INT64);
+  optional("state_id", HOFFSET(RtHdf5GraphStructure, state_id), H5T_NATIVE_INT32);
   return memory_type;
 }
 
@@ -1883,7 +1900,7 @@ extern "C" RtHdf5GraphDataset* rt_hdf5_graph_dataset_new(const char* path) {
           "HDF5 structures dataset must be one-dimensional");
     }
     dataset->length = static_cast<size_t>(dims[0]);
-    dataset->memory_type = make_hdf5_graph_memory_type();
+    dataset->memory_type = make_hdf5_graph_memory_type(dataset->dataset);
 
     Hdf5Handle creation_properties(
         H5Dget_create_plist(dataset->dataset), H5Pclose);
@@ -1941,7 +1958,11 @@ extern "C" bool rt_hdf5_graph_dataset_get(
       dataset->cache_start = (index / capacity) * capacity;
       const auto count =
           std::min(capacity, dataset->length - dataset->cache_start);
-      dataset->cache.resize(count);
+      RtHdf5GraphStructure defaults{};
+      defaults.total_spin = 1.0;
+      defaults.reaction_id = -1;
+      defaults.state_id = -1;
+      dataset->cache.assign(count, defaults);
 
       Hdf5Handle file_space(H5Dget_space(dataset->dataset), H5Sclose);
       const hsize_t start[] = {
