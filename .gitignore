@@ -24,7 +24,3 @@ rtorch_100k_28092026_results.json
 rtorch_100k_results.json
 rtorch_50k_28092026_results.json
 rtorch_50k_results.json
-scripts/benchmark-python-comparison.py
-scripts/build-python.sh
-scripts/plot-optimizations.py
-scripts/verify-python-comparison.py
