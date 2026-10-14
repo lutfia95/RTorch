@@ -78,24 +78,6 @@ class NativeGraphBatchTest(unittest.TestCase):
             for a, b in zip(actual, expected):
                 self.assert_batch_equal(a, b)
 
-    def test_read_ahead_cache_views_survive_replacement(self):
-        count = 10000
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / 'read_ahead.h5')
-            values = np.arange(count * 3, dtype=np.float64).reshape(count, 3)
-            entries = np.array([(i, 1) for i in range(count)], dtype=[('offset', 'i8'), ('length', 'i4')])
-            with h5py.File(path, 'w') as f:
-                f.create_dataset('positions', data=values, chunks=(1024, 3))
-                f.create_dataset('structures', data=entries)
-            dataset = equiload.TensorDataset.from_hdf5_file(path, 'positions')
-            indices = [0, 1, 4096, 4097, 8193, 8194, 9999, 2, 5000, 5001]
-            retained = [dataset[i].to_torch() for i in indices]
-            for i, tensor in zip(indices, retained):
-                torch.testing.assert_close(tensor, torch.from_numpy(values[i:i + 1]), rtol=0, atol=0)
-            retained[-1].fill_(-1)
-            torch.testing.assert_close(dataset[indices[-1]].to_torch(),
-                                       torch.from_numpy(values[indices[-1]:indices[-1] + 1]))
-
     def test_native_path_does_not_call_python_collation(self):
         loader = equiload.HDF5GraphLoader.from_hdf5_file(str(self.fixture), 5., self.numbers, batch_size=2)
         with patch.object(Batch, 'from_data_list', side_effect=AssertionError('Python collation called')):

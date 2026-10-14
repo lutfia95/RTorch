@@ -5,9 +5,10 @@ build-backend = "maturin"
 [project]
 name = "equiload"
 dynamic = ["version"]
-description = "Python bindings for EquiLoad tensor loading"
+description = "Native HDF5 graph loader for Equitrain and PyTorch Geometric"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
+readme = "README.md"
 dependencies = ["torch", "torch-geometric"]
 
 [tool.maturin]
