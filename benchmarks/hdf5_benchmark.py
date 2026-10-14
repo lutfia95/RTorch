@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import argparse
@@ -105,9 +103,7 @@ def resolve_atomic_numbers(args: argparse.Namespace) -> list[int]:
             dataset = handle["atomic_numbers"]
             chunk_size = 1_000_000
             for start in range(0, len(dataset), chunk_size):
-                unique_numbers.update(
-                    int(value) for value in dataset[start : start + chunk_size]
-                )
+                unique_numbers.update(int(value) for value in dataset[start : start + chunk_size])
         numbers = sorted(unique_numbers)
     if not numbers:
         raise ValueError("No atomic numbers were supplied or found in the HDF5 file")
@@ -150,17 +146,13 @@ class MemorySnapshot:
             except (FileNotFoundError, IndexError, OSError, ValueError):
                 rss = 0
         uss = sum(
-            values.get(key, 0)
-            for key in ("Private_Clean", "Private_Dirty", "Private_Hugetlb")
+            values.get(key, 0) for key in ("Private_Clean", "Private_Dirty", "Private_Hugetlb")
         )
         shared = sum(
-            values.get(key, 0)
-            for key in ("Shared_Clean", "Shared_Dirty", "Shared_Hugetlb")
+            values.get(key, 0) for key in ("Shared_Clean", "Shared_Dirty", "Shared_Hugetlb")
         )
         high_water_scale = 1 if sys.platform == "darwin" else 1024
-        high_water = (
-            int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * high_water_scale
-        )
+        high_water = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * high_water_scale
         return cls(
             rss=rss,
             pss=values.get("Pss", rss),
@@ -325,9 +317,7 @@ def _memory_line(label: str, snapshot: MemorySnapshot) -> str:
 def print_pass(label: str, metrics: PassMetrics) -> None:
     counts = metrics.counts
     rate = counts.structures / metrics.wall_seconds if metrics.wall_seconds else 0.0
-    cpu_percent = (
-        100 * metrics.cpu_seconds / metrics.wall_seconds if metrics.wall_seconds else 0.0
-    )
+    cpu_percent = 100 * metrics.cpu_seconds / metrics.wall_seconds if metrics.wall_seconds else 0.0
     print(
         f"{label}: {metrics.wall_seconds:.6f} s wall, "
         f"{metrics.cpu_seconds:.6f} s CPU ({cpu_percent:.1f}%), "
@@ -400,10 +390,7 @@ def run_benchmark(
 
     if args.warmup_batches:
         warmup = _consume(loader, args.warmup_batches, transfer_device=transfer_device)
-        print(
-            f"Warm-up: {warmup.outer_batches} loader batches, "
-            f"{warmup.structures} structures"
-        )
+        print(f"Warm-up: {warmup.outer_batches} loader batches, {warmup.structures} structures")
 
     runs: list[PassMetrics] = []
     for index in range(args.repeats):

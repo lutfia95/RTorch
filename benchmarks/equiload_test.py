@@ -1,12 +1,11 @@
-
-
 import argparse
 import ctypes
 import os
 from pathlib import Path
 
 import torch
-#python equiload_test.py /mnt/e/EquiLoad/mptraj/train.h5 --r-max 5.0 --batch-size 2 --repeats 5 --json equiload-results.json
+
+# python equiload_test.py /mnt/e/EquiLoad/mptraj/train.h5 --r-max 5.0 --batch-size 2 --repeats 5 --json equiload-results.json
 from hdf5_benchmark import add_common_arguments, run_benchmark
 
 
@@ -21,9 +20,7 @@ def _preload_local_hdf5() -> None:
     library_dirs = []
     if hdf5_root := os.environ.get("HDF5_ROOT"):
         library_dirs.append(Path(hdf5_root).expanduser() / "lib")
-    library_dirs.append(
-        Path(__file__).resolve().parents[1] / "third_party" / "hdf5" / "lib"
-    )
+    library_dirs.append(Path(__file__).resolve().parents[1] / "third_party" / "hdf5" / "lib")
 
     load_errors = []
     for library_dir in library_dirs:
@@ -43,9 +40,7 @@ def _preload_local_hdf5() -> None:
             return
 
     if load_errors:
-        raise OSError(
-            "Unable to preload an HDF5 runtime:\n  " + "\n  ".join(load_errors)
-        )
+        raise OSError("Unable to preload an HDF5 runtime:\n  " + "\n  ".join(load_errors))
 
 
 def main() -> None:
@@ -72,8 +67,7 @@ def main() -> None:
         )
 
     run_benchmark(
-        f"EquiLoad {getattr(equiload, '__version__', 'unknown')} / "
-        f"PyTorch {torch.__version__}",
+        f"EquiLoad {getattr(equiload, '__version__', 'unknown')} / PyTorch {torch.__version__}",
         args,
         build_loader,
     )

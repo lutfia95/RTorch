@@ -27,15 +27,9 @@ class Comparison:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--python-50k", type=Path, default=RESULTS / "python_50k_results.json"
-    )
-    parser.add_argument(
-        "--equiload-50k", type=Path, default=RESULTS / "equiload_50k_results.json"
-    )
-    parser.add_argument(
-        "--python-100k", type=Path, default=RESULTS / "python_100k_results.json"
-    )
+    parser.add_argument("--python-50k", type=Path, default=RESULTS / "python_50k_results.json")
+    parser.add_argument("--equiload-50k", type=Path, default=RESULTS / "equiload_50k_results.json")
+    parser.add_argument("--python-100k", type=Path, default=RESULTS / "python_100k_results.json")
     parser.add_argument(
         "--equiload-100k", type=Path, default=RESULTS / "equiload_100k_results.json"
     )
@@ -57,9 +51,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Plot complete pairs and warn about missing reports.",
     )
-    parser.add_argument(
-        "--show", action="store_true", help="Open an interactive plot window."
-    )
+    parser.add_argument("--show", action="store_true", help="Open an interactive plot window.")
     return parser.parse_args()
 
 
@@ -86,9 +78,7 @@ def run_structures(run: dict[str, Any]) -> int:
 def validate_report(path: Path, report: dict[str, Any], expected: int) -> None:
     counts = report["runs"][0]["counts"]
     if int(counts["structures"]) != expected:
-        raise ValueError(
-            f"{path} processed {counts['structures']} structures; expected {expected}"
-        )
+        raise ValueError(f"{path} processed {counts['structures']} structures; expected {expected}")
     for index, run in enumerate(report["runs"][1:], start=2):
         if run["counts"] != counts:
             raise ValueError(f"{path} run {index} has different work counts")
@@ -113,9 +103,7 @@ def validate_pair(comparison: Comparison, paths: dict[str, Path]) -> None:
         if python_report["settings"].get(name) != equiload_report["settings"].get(name)
     ]
     if mismatches:
-        raise ValueError(
-            f"{comparison.label} settings differ: {', '.join(mismatches)}"
-        )
+        raise ValueError(f"{comparison.label} settings differ: {', '.join(mismatches)}")
 
 
 def collect_comparisons(args: argparse.Namespace) -> list[Comparison]:
@@ -141,10 +129,7 @@ def collect_comparisons(args: argparse.Namespace) -> list[Comparison]:
                 continue
             raise FileNotFoundError(message)
 
-        reports = {
-            implementation: load_report(path)
-            for implementation, path in paths.items()
-        }
+        reports = {implementation: load_report(path) for implementation, path in paths.items()}
         for implementation, report in reports.items():
             validate_report(paths[implementation], report, expected)
         comparison = Comparison(label, expected, reports)
@@ -161,15 +146,12 @@ def wall_values(report: dict[str, Any]) -> list[float]:
 
 
 def throughput_values(report: dict[str, Any]) -> list[float]:
-    return [
-        run_structures(run) / float(run["wall_seconds"]) for run in report["runs"]
-    ]
+    return [run_structures(run) / float(run["wall_seconds"]) for run in report["runs"]]
 
 
 def cpu_percent_values(report: dict[str, Any]) -> list[float]:
     return [
-        100.0 * float(run["cpu_seconds"]) / float(run["wall_seconds"])
-        for run in report["runs"]
+        100.0 * float(run["cpu_seconds"]) / float(run["wall_seconds"]) for run in report["runs"]
     ]
 
 
@@ -190,9 +172,7 @@ def retained_memory_by_run(report: dict[str, Any], metric: str) -> list[float]:
 
 def total_retained_memory(report: dict[str, Any], metric: str) -> float:
     runs = report["runs"]
-    return float(runs[-1]["memory_end"][metric]) - float(
-        runs[0]["memory_start"][metric]
-    )
+    return float(runs[-1]["memory_end"][metric]) - float(runs[0]["memory_start"][metric])
 
 
 def implementation_centers(index: int, width: float = 0.36) -> dict[str, float]:
@@ -228,8 +208,7 @@ def plot_median_bars(
             for index in range(len(comparisons))
         ]
         values_by_workload = [
-            value_fn(comparison.reports[implementation])
-            for comparison in comparisons
+            value_fn(comparison.reports[implementation]) for comparison in comparisons
         ]
         medians = [statistics.median(values) for values in values_by_workload]
         bars = axis.bar(
@@ -244,7 +223,9 @@ def plot_median_bars(
             centers, values_by_workload, bars, medians, strict=True
         ):
             count = len(values)
-            offsets = [0.0] if count == 1 else [0.10 * (i / (count - 1) - 0.5) for i in range(count)]
+            offsets = (
+                [0.0] if count == 1 else [0.10 * (i / (count - 1) - 0.5) for i in range(count)]
+            )
             axis.scatter(
                 [center + offset for offset in offsets],
                 values,
@@ -262,9 +243,7 @@ def plot_median_bars(
     axis.grid(axis="y", alpha=0.25)
 
 
-def plot_memory_footprint(
-    axis: Any, comparisons: list[Comparison], metric: str
-) -> None:
+def plot_memory_footprint(axis: Any, comparisons: list[Comparison], metric: str) -> None:
     width = 0.36
     gib = 1024.0**3
     for implementation in IMPLEMENTATIONS:
@@ -272,13 +251,9 @@ def plot_memory_footprint(
             implementation_centers(index, width)[implementation]
             for index in range(len(comparisons))
         ]
-        peaks = [
-            maximum_memory(item.reports[implementation], metric) / gib
-            for item in comparisons
-        ]
+        peaks = [maximum_memory(item.reports[implementation], metric) / gib for item in comparisons]
         initialized = [
-            memory_after_loader(item.reports[implementation], metric) / gib
-            for item in comparisons
+            memory_after_loader(item.reports[implementation], metric) / gib for item in comparisons
         ]
         bars = axis.bar(
             centers,
@@ -306,9 +281,7 @@ def plot_memory_footprint(
     axis.grid(axis="y", alpha=0.25)
 
 
-def plot_retained_memory(
-    axis: Any, comparisons: list[Comparison], metric: str
-) -> None:
+def plot_retained_memory(axis: Any, comparisons: list[Comparison], metric: str) -> None:
     width = 0.36
     mib = 1024.0**2
     hatches = ("", "///", "xxx", "...")
@@ -319,8 +292,7 @@ def plot_retained_memory(
         ]
         bottoms = [0.0] * len(comparisons)
         run_growth = [
-            retained_memory_by_run(item.reports[implementation], metric)
-            for item in comparisons
+            retained_memory_by_run(item.reports[implementation], metric) for item in comparisons
         ]
         repeat_count = max(len(values) for values in run_growth)
         for repeat in range(repeat_count):
@@ -338,11 +310,7 @@ def plot_retained_memory(
                 hatch=hatches[repeat % len(hatches)],
                 edgecolor="white" if repeat else COLORS[implementation],
                 linewidth=0.8,
-                label=(
-                    f"Run {repeat + 1} retained"
-                    if implementation == "Python"
-                    else None
-                ),
+                label=(f"Run {repeat + 1} retained" if implementation == "Python" else None),
             )
             bottoms = [bottom + value for bottom, value in zip(bottoms, values, strict=True)]
         for center, total in zip(centers, bottoms, strict=True):
@@ -408,9 +376,7 @@ def print_summary(comparisons: list[Comparison], metric: str) -> None:
         print(f"{comparison.label} EquiLoad speedup: {python_wall / equiload_wall:.2f}x")
 
 
-def make_plot(
-    comparisons: list[Comparison], output: Path, metric: str, show: bool
-) -> None:
+def make_plot(comparisons: list[Comparison], output: Path, metric: str, show: bool) -> None:
     os.environ.setdefault(
         "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "equiload-matplotlib-cache")
     )
@@ -463,9 +429,7 @@ def make_plot(
         fontweight="bold",
         y=0.992,
     )
-    figure.subplots_adjust(
-        left=0.07, right=0.985, bottom=0.07, top=0.88, hspace=0.30, wspace=0.12
-    )
+    figure.subplots_adjust(left=0.07, right=0.985, bottom=0.07, top=0.88, hspace=0.30, wspace=0.12)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=180, bbox_inches="tight")

@@ -1601,11 +1601,9 @@ mod tests {
         assert_eq!(normalized_edges(left), normalized_edges(right));
 
         for neighborhood in [left, right] {
-            for (unit, shift) in neighborhood
-                .unit_shifts
-                .chunks_exact(3)
-                .zip(neighborhood.shifts.chunks_exact(3))
-            {
+            let (unit_shifts, _) = neighborhood.unit_shifts.as_chunks::<3>();
+            let (shifts, _) = neighborhood.shifts.as_chunks::<3>();
+            for (unit, shift) in unit_shifts.iter().zip(shifts) {
                 let expected = lattice_shift(
                     [unit[0] as i64, unit[1] as i64, unit[2] as i64],
                     &neighborhood.cell,

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the checked-out Python and native loaders serially in fresh processes."""
+
 from __future__ import annotations
 
 import argparse
@@ -67,8 +68,12 @@ def summarize(
             report = json.loads(path.read_text())
             assert report["dataset"] == str((datasets / filename).resolve()), path
             expected_settings = dict(
-                r_max=5., batch_size=batch_size, max_batches=max_batches,
-                warmup_batches=1, repeats=repeats, memory_sample_ms=250.,
+                r_max=5.0,
+                batch_size=batch_size,
+                max_batches=max_batches,
+                warmup_batches=1,
+                repeats=repeats,
+                memory_sample_ms=250.0,
             )
             if transfer_device:
                 expected_settings["transfer_device"] = transfer_device
@@ -97,26 +102,44 @@ def summarize(
                 rss_before_loader_bytes=report["memory_before_loader"]["rss"],
                 retained_rss_bytes=runs[-1]["memory_end"]["rss"] - runs[0]["memory_start"]["rss"],
             )
-        pairs.append(dict(
-            case=name, dataset=filename, batch_size=batch_size,
-            counts=python["runs"][0]["counts"], **values,
-            speedup=values["python"]["median_wall_seconds"] / values["equiload"]["median_wall_seconds"],
-            peak_rss_reduction_percent=100 * (1 - values["equiload"]["peak_rss_bytes"] / values["python"]["peak_rss_bytes"]),
-        ))
+        pairs.append(
+            dict(
+                case=name,
+                dataset=filename,
+                batch_size=batch_size,
+                counts=python["runs"][0]["counts"],
+                **values,
+                speedup=values["python"]["median_wall_seconds"]
+                / values["equiload"]["median_wall_seconds"],
+                peak_rss_reduction_percent=100
+                * (1 - values["equiload"]["peak_rss_bytes"] / values["python"]["peak_rss_bytes"]),
+            )
+        )
     equitrain_root = equitrain_source_root()
     sources = (
-        BENCHMARKS / "python_loader_test.py", BENCHMARKS / "equiload_test.py", BENCHMARKS / "hdf5_benchmark.py",
+        BENCHMARKS / "python_loader_test.py",
+        BENCHMARKS / "equiload_test.py",
+        BENCHMARKS / "hdf5_benchmark.py",
         equitrain_root / "data/backend_torch/loaders_impl.py",
-        equitrain_root / "data/format_hdf5/dataset.py", equiload_extension_path(),
+        equitrain_root / "data/format_hdf5/dataset.py",
+        equiload_extension_path(),
     )
     return dict(
         pairs=pairs,
         created_at=datetime.now(timezone.utc).isoformat(),
-        executable=python["executable"], python=python["python"],
-        environment={key: os.environ.get(key) for key in (
-            "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-            "EQUILOAD_CPU_BRIDGE", "HDF5_ROOT", "CUDA_VISIBLE_DEVICES",
-        )},
+        executable=python["executable"],
+        python=python["python"],
+        environment={
+            key: os.environ.get(key)
+            for key in (
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "EQUILOAD_CPU_BRIDGE",
+                "HDF5_ROOT",
+                "CUDA_VISIBLE_DEVICES",
+            )
+        },
         methodology="Local python_loader_test.py versus equiload_test.py; serial fresh processes, "
         "one warmup batch, two repeats by default, 250 ms memory sampling, no heap profiling. "
         "Runtime measures consumption after initialization. Memory includes interpreter/imports; "
@@ -128,6 +151,7 @@ def summarize(
 def plot(summary: dict, output: Path) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/equiload-comparison-mpl")
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
@@ -136,22 +160,37 @@ def plot(summary: dict, output: Path) -> None:
     x = np.arange(len(pairs))
     fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), layout="constrained")
     colors = dict(python="#4C78A8", equiload="#F58518")
-    for implementation, shift in (("python", -.19), ("equiload", .19)):
-        for axis, key, scale in ((axes[0], "median_wall_seconds", 1),
-                                 (axes[1], "peak_rss_bytes", 2**20),
-                                 (axes[2], "process_high_water_bytes", 2**20)):
+    for implementation, shift in (("python", -0.19), ("equiload", 0.19)):
+        for axis, key, scale in (
+            (axes[0], "median_wall_seconds", 1),
+            (axes[1], "peak_rss_bytes", 2**20),
+            (axes[2], "process_high_water_bytes", 2**20),
+        ):
             heights = [p[implementation][key] / scale for p in pairs]
-            bars = axis.bar(x + shift, heights, .38, label=implementation.title(), color=colors[implementation])
+            bars = axis.bar(
+                x + shift, heights, 0.38, label=implementation.title(), color=colors[implementation]
+            )
             axis.bar_label(bars, labels=[f"{v:.1f}" for v in heights], fontsize=7, padding=2)
-    labels = ["Train 50k\nB=2", "Train 100k\nB=2", "Train 2k\nB=2",
-              "Valid 82.5k\nB=2", "Train 100k\nB=32", "Train 16,384\nB=8192"]
-    for axis, title, ylabel in zip(axes, ("Runtime (median)", "Sampled peak RSS", "Process memory high-water"),
-                                   ("Seconds", "MiB", "MiB")):
+    labels = [
+        "Train 50k\nB=2",
+        "Train 100k\nB=2",
+        "Train 2k\nB=2",
+        "Valid 82.5k\nB=2",
+        "Train 100k\nB=32",
+        "Train 16,384\nB=8192",
+    ]
+    for axis, title, ylabel in zip(
+        axes,
+        ("Runtime (median)", "Sampled peak RSS", "Process memory high-water"),
+        ("Seconds", "MiB", "MiB"),
+    ):
         axis.set(title=title, ylabel=ylabel, xticks=x, xticklabels=labels)
         axis.tick_params(axis="x", labelsize=8)
         axis.set_ylim(0, axis.get_ylim()[1] * 1.15)
         axis.legend()
-    fig.suptitle("Fresh local Python versus optimized EquiLoad — matching structures, nodes and edges")
+    fig.suptitle(
+        "Fresh local Python versus optimized EquiLoad — matching structures, nodes and edges"
+    )
     fig.savefig(output / "comparison.png", dpi=180)
     plt.close(fig)
 
@@ -161,10 +200,19 @@ def main() -> None:
     parser.add_argument("--dataset-dir", type=Path, default=ROOT / "../../mptraj")
     parser.add_argument("--output-dir", type=Path, default=BENCHMARKS / "results")
     parser.add_argument("--repeats", type=int, default=2)
-    parser.add_argument("--transfer-device", help="Move every graph batch to this CUDA device during timing.")
-    parser.add_argument("--implementations", nargs="+", choices=("python", "equiload"), default=("python", "equiload"),
-                        help="Select loaders to run; the final summary still requires both reports.")
-    parser.add_argument("--resume", action="store_true", help="Reuse reports already produced in this directory.")
+    parser.add_argument(
+        "--transfer-device", help="Move every graph batch to this CUDA device during timing."
+    )
+    parser.add_argument(
+        "--implementations",
+        nargs="+",
+        choices=("python", "equiload"),
+        default=("python", "equiload"),
+        help="Select loaders to run; the final summary still requires both reports.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Reuse reports already produced in this directory."
+    )
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("repeats must be positive")
@@ -178,17 +226,40 @@ def main() -> None:
                 if previous.get("settings", {}).get("transfer_device") == args.transfer_device:
                     print(f"Reusing {report}", flush=True)
                     continue
-            script = BENCHMARKS / ("python_loader_test.py" if implementation == "python" else "equiload_test.py")
-            command = [sys.executable, "-u", str(script),
-                       str((args.dataset_dir / filename).resolve()), "--r-max", "5.0", "--batch-size", str(batch_size),
-                       "--max-batches", str(max_batches), "--repeats", str(args.repeats), "--skip-python-heap",
-                       "--memory-sample-ms", "250", "--json", str(report)]
+            script = BENCHMARKS / (
+                "python_loader_test.py" if implementation == "python" else "equiload_test.py"
+            )
+            command = [
+                sys.executable,
+                "-u",
+                str(script),
+                str((args.dataset_dir / filename).resolve()),
+                "--r-max",
+                "5.0",
+                "--batch-size",
+                str(batch_size),
+                "--max-batches",
+                str(max_batches),
+                "--repeats",
+                str(args.repeats),
+                "--skip-python-heap",
+                "--memory-sample-ms",
+                "250",
+                "--json",
+                str(report),
+            ]
             if args.transfer_device:
                 command.extend(["--transfer-device", args.transfer_device])
             print(f"Starting {implementation}: {name}", flush=True)
             with (output / f"{implementation}_{name}.log").open("w") as log:
-                with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT, text=True, bufsize=1) as child:
+                with subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                ) as child:
                     for line in child.stdout:
                         log.write(line)
                         log.flush()
@@ -198,12 +269,17 @@ def main() -> None:
                     if status:
                         raise subprocess.CalledProcessError(status, command)
             results = json.loads(report.read_text())
-            print(f"Completed {implementation}: {name}, median {results['summary']['median_wall_seconds']:.3f} s", flush=True)
+            print(
+                f"Completed {implementation}: {name}, median {results['summary']['median_wall_seconds']:.3f} s",
+                flush=True,
+            )
     summary = summarize(output, args.repeats, args.dataset_dir, args.transfer_device)
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     plot(summary, output)
     for pair in summary["pairs"]:
-        print(f"{pair['case']}: {pair['speedup']:.2f}x speedup; RSS change {pair['peak_rss_reduction_percent']:.1f}% lower")
+        print(
+            f"{pair['case']}: {pair['speedup']:.2f}x speedup; RSS change {pair['peak_rss_reduction_percent']:.1f}% lower"
+        )
 
 
 if __name__ == "__main__":

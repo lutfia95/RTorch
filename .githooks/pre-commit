@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run EquiLoad's Python and Rust quality gates before each commit.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+hook_python="$(git config --local --get equiload.hookPython || true)"
+if [[ -z "$hook_python" ]]; then
+    hook_python="$repo_root/.venv/bin/python"
+fi
+if [[ ! -x "$hook_python" ]]; then
+    printf 'EquiLoad pre-commit hook: Python environment not found at %s.\n' "$hook_python" >&2
+    printf 'Run bash scripts/install-git-hooks.sh after creating the development environment.\n' >&2
+    exit 1
+fi
+if ! "$hook_python" -m ruff --version >/dev/null 2>&1; then
+    printf 'EquiLoad pre-commit hook: Ruff is not installed for %s.\n' "$hook_python" >&2
+    printf 'Run bash scripts/install-git-hooks.sh to install the development checks.\n' >&2
+    exit 1
+fi
+
+"$hook_python" -m ruff format --check benchmarks scripts crates/equiload-python/tests
+"$hook_python" -m ruff check benchmarks scripts crates/equiload-python/tests
+
+venv_dir="$(cd "$(dirname "$hook_python")/.." && pwd)"
+source "$repo_root/scripts/setup-equiload-env.sh" --venv "$venv_dir" --no-install
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings

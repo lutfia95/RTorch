@@ -1,4 +1,5 @@
 """Public EquiLoad API tests."""
+
 from pathlib import Path
 import unittest
 
@@ -19,7 +20,10 @@ class EquiLoadGraphLoaderTest(unittest.TestCase):
         with h5py.File(fixture, "r") as handle:
             atomic_numbers = sorted({int(value) for value in handle["atomic_numbers"][:]})
         loader = equiload.HDF5GraphLoader.from_hdf5_files(
-            [str(fixture)], r_max=5.0, atomic_numbers=atomic_numbers, batch_size=2,
+            [str(fixture)],
+            r_max=5.0,
+            atomic_numbers=atomic_numbers,
+            batch_size=2,
         )
         data_list = next(iter(loader))
         batch = data_list[0]
@@ -41,11 +45,18 @@ class EquiLoadGraphLoaderTest(unittest.TestCase):
         for shuffle in (False, True):
             for drop_last in (False, True):
                 loader = equiload.HDF5GraphLoader.from_hdf5_files(
-                    [str(fixture), str(fixture)], 5.0, numbers,
-                    batch_size=5, shuffle=shuffle, seed=42, drop_last=drop_last,
+                    [str(fixture), str(fixture)],
+                    5.0,
+                    numbers,
+                    batch_size=5,
+                    shuffle=shuffle,
+                    seed=42,
+                    drop_last=drop_last,
                 )
-                epochs = [[i for batches in loader for batch in batches for i in batch.idx.tolist()]
-                          for _ in range(2)]
+                epochs = [
+                    [i for batches in loader for batch in batches for i in batch.idx.tolist()]
+                    for _ in range(2)
+                ]
                 self.assertEqual(epochs[0], epochs[1])
                 expected = list(range(length)) * 2
                 count = len(expected) // 5 * 5 if drop_last else len(expected)

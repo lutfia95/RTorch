@@ -70,7 +70,16 @@ cargo test --workspace --all-features
 python -m pytest crates/equiload-python/tests -q
 ```
 
-`equiload-core` and `equiload-sys` are internal implementation crates and are not published. Development benchmarks live in [benchmarks](benchmarks/README.md); helper scripts live in [tools](tools/README.md).
+Install the versioned pre-commit checks once per clone:
+
+```bash
+rustup component add rustfmt clippy
+bash scripts/install-git-hooks.sh
+```
+
+The hook runs Ruff formatting and linting for Python, then `cargo fmt` and strict Clippy for Rust. The installer records the active virtual environment, or the checkout's `.venv` when none is active.
+
+`equiload-core` and `equiload-sys` are internal implementation crates and are not published. Development benchmarks live in [benchmarks](benchmarks/README.md).
 
 ## License
 
