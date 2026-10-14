@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
+requires = ["maturin[patchelf]>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
@@ -9,7 +9,21 @@ description = "Native HDF5 graph loader for Equitrain and PyTorch Geometric"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
 readme = "README.md"
-dependencies = ["torch", "torch-geometric"]
+dependencies = [
+    "torch>=2.6,<2.15",
+    "torch-geometric>=2.5",
+]
+keywords = ["equitrain", "hdf5", "pytorch-geometric", "data-loader"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+]
+
+[project.urls]
+Repository = "https://github.com/lutfia95/EquiLoad"
 
 [tool.maturin]
 manifest-path = "crates/equiload-python/Cargo.toml"

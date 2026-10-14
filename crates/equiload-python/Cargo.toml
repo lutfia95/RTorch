@@ -14,9 +14,9 @@ test = false
 doctest = false
 
 [features]
-default = []
+default = ["hdf5"]
 hdf5 = ["equiload-core/hdf5"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
-equiload-core = { package = "equiload", path = "../equiload" }
+equiload-core = { path = "../equiload-core" }

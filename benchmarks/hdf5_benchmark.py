@@ -25,7 +25,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "path",
         nargs="?",
         type=Path,
-        default=Path(__file__).resolve().parent / "test_data" / "train.h5",
+        default=Path(__file__).resolve().parents[1] / "test_data" / "train.h5",
         help="Equitrain-format HDF5 file (default: test_data/train.h5)",
     )
     parser.add_argument("--r-max", type=float, default=5.0)

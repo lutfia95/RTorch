@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/equiload", "crates/equiload-python", "crates/equiload-sys"]
+members = ["crates/equiload-core", "crates/equiload-python", "crates/equiload-sys"]
 resolver = "2"
 
 [workspace.package]

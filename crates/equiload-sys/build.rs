@@ -68,8 +68,16 @@ fn main() {
     }
 
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("macos") => println!("cargo:rustc-link-lib=dylib=c++"),
-        Ok("linux") => println!("cargo:rustc-link-lib=dylib=stdc++"),
+        // Wheels live beside the installed torch package, so use a relocatable
+        // loader path rather than the absolute path used while compiling.
+        Ok("linux") => {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../torch/lib");
+        }
+        Ok("macos") => {
+            println!("cargo:rustc-link-lib=dylib=c++");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../torch/lib");
+        }
         _ => {}
     }
 }
@@ -88,7 +96,6 @@ fn emit_hdf5_link_flags(link_file: PathBuf) {
         if path.is_absolute() {
             if let Some(parent) = path.parent() {
                 println!("cargo:rustc-link-search=native={}", parent.display());
-                emit_runtime_search_path(parent);
             }
             if let Some(name) = library_name(&path) {
                 println!("cargo:rustc-link-lib=dylib={name}");
@@ -112,13 +119,4 @@ fn library_name(path: &std::path::Path) -> Option<String> {
     }
 
     Some(name.to_string())
-}
-
-fn emit_runtime_search_path(path: &std::path::Path) {
-    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("linux") | Ok("macos") => {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path.display());
-        }
-        _ => {}
-    }
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # EquiLoad / LibTorch environment for Linux + Bash + an existing uv venv.
 #
-#   source ./setup-equiload-env.sh
-#   source ./setup-equiload-env.sh --venv /path/to/.venv --check
-#   source ./setup-equiload-env.sh --cuda-root /usr/local/cuda-12.8
+#   source scripts/setup-equiload-env.sh
+#   source scripts/setup-equiload-env.sh --venv /path/to/.venv --check
+#   source scripts/setup-equiload-env.sh --cuda-root /usr/local/cuda-12.8
 #
 # This file must be SOURCED to change the calling shell. It does not build or
 # clean your project. Run it again after moving the project or running uv sync.
@@ -44,7 +44,7 @@ _equiload_setup_main() {
             --check) check=1; shift ;;
             --help)
                 cat <<'HELP'
-Usage: source setup-equiload-env.sh [options]
+Usage: source scripts/setup-equiload-env.sh [options]
   --venv DIR       Select an existing uv virtual environment explicitly.
   --cuda-root DIR  Use a full external toolkit matching PyTorch's CUDA series.
   --no-install     Do not install packages; still repair local linker aliases.
@@ -55,7 +55,7 @@ Discovery: --venv, then VIRTUAL_ENV, then .venv in the current directory or
 its parents, then .venv beside this script or in its parents.
 Exports include LIBTORCH, Torch_DIR, CUDA_HOME, CUDACXX and the build/library
 search paths. Existing TORCH_CUDA_ARCH_LIST is preserved. Re-sourcing is safe.
-Linux/Bash only. uv must be installed. CPU-only torch skips CUDA setup.
+Linux/Bash only. Uses uv when available, otherwise pip. CPU-only torch skips CUDA setup.
 CUDA 13+ compiler components can be installed via pip; older CUDA requires
 an existing full toolkit passed with --cuda-root. Project files are not edited.
 HELP
@@ -83,7 +83,7 @@ HELP
     fi
     venv="$(cd -- "$venv" && pwd -P)" || return 1
     python="$venv/bin/python"
-    uv="$(type -P uv)" || { printf '%s\n' 'uv is required but was not found on PATH.' >&2; return 1; }
+    uv="$(type -P uv || true)"
     if ! exports="$("$python" - "$uv" "$install" "$check" "$cuda_root" <<'__EQUILOAD_PYTHON__'
 import ast
 import contextlib
@@ -125,7 +125,10 @@ def install(*requirements):
     if not INSTALL:
         fail('Missing packages; run again without --no-install: ' + ' '.join(requirements))
     note('Ensuring packages: ' + ' '.join(requirements))
-    run([UV, 'pip', 'install', '--python', PYTHON, *requirements], stdout=sys.stderr)
+    if UV:
+        run([UV, 'pip', 'install', '--python', PYTHON, *requirements], stdout=sys.stderr)
+    else:
+        run([PYTHON, '-m', 'pip', 'install', *requirements], stdout=sys.stderr)
     importlib.invalidate_caches()
 
 def inside_venv(path):
@@ -244,6 +247,9 @@ def main():
 
     root = None
     libs = [torch_root / 'lib']
+    hdf5_root = Path(os.environ['HDF5_ROOT']).expanduser().absolute() if os.environ.get('HDF5_ROOT') else None
+    if hdf5_root and (hdf5_root / 'lib').is_dir():
+        libs.append(hdf5_root / 'lib')
     bins = [VENV / 'bin']
     if series:
         if not re.fullmatch(r'\d+\.\d+', series):

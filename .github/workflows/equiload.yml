@@ -76,5 +76,37 @@ jobs:
               )
           PY
 
-      - name: Run HDF5 smoke example
-        run: cargo run -p equiload --features hdf5 --example hdf5 -- ci_data/train.h5 positions
+
+  python-wheel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libhdf5-dev
+
+      - name: Create build environment
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest h5py torch torch-geometric
+
+      - name: Build and install wheel
+        run: |
+          . .venv/bin/activate
+          bash scripts/build-wheel.sh
+          python -m pip install --force-reinstall --no-deps dist/equiload-*.whl
+
+      - name: Test installed wheel
+        run: |
+          . .venv/bin/activate
+          python -m pytest crates/equiload-python/tests -q
+          python -c "import equiload; print(equiload.__file__)"

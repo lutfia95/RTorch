@@ -14,6 +14,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BENCHMARKS = Path(__file__).resolve().parent
 CASES = (
     ("50k", "train.h5", 2, 25_000, 50_000),
     ("100k", "train.h5", 2, 50_000, 100_000),
@@ -96,7 +97,7 @@ def summarize(
         ))
     equitrain_root = equitrain_source_root()
     sources = (
-        ROOT / "python_loader_test.py", ROOT / "equiload_test.py", ROOT / "hdf5_benchmark.py",
+        BENCHMARKS / "python_loader_test.py", BENCHMARKS / "equiload_test.py", BENCHMARKS / "hdf5_benchmark.py",
         equitrain_root / "data/backend_torch/loaders_impl.py",
         equitrain_root / "data/format_hdf5/dataset.py", ROOT / "equiload.so",
     )
@@ -169,7 +170,7 @@ def main() -> None:
                 if previous.get("settings", {}).get("transfer_device") == args.transfer_device:
                     print(f"Reusing {report}", flush=True)
                     continue
-            script = ROOT / ("python_loader_test.py" if implementation == "python" else "equiload_test.py")
+            script = BENCHMARKS / ("python_loader_test.py" if implementation == "python" else "equiload_test.py")
             command = [sys.executable, "-u", str(script),
                        str((args.dataset_dir / filename).resolve()), "--r-max", "5.0", "--batch-size", str(batch_size),
                        "--max-batches", str(max_batches), "--repeats", str(args.repeats), "--skip-python-heap",

@@ -22,7 +22,7 @@ def _preload_local_hdf5() -> None:
     if hdf5_root := os.environ.get("HDF5_ROOT"):
         library_dirs.append(Path(hdf5_root).expanduser() / "lib")
     library_dirs.append(
-        Path(__file__).resolve().parent / "third_party" / "hdf5" / "lib"
+        Path(__file__).resolve().parents[1] / "third_party" / "hdf5" / "lib"
     )
 
     load_errors = []

@@ -1,58 +1,46 @@
 # EquiLoad
 
-EquiLoad is an optional native HDF5 graph loader for [Equitrain](https://github.com/lutfia95/equitrain) and PyTorch Geometric. It reads Equitrain trajectory files and produces ordinary PyG batches, while keeping graph construction and HDF5 reads in native code.
+EquiLoad is an optional native HDF5 graph loader for [Equitrain](https://github.com/lutfia95/equitrain) and PyTorch Geometric. It reads Equitrain trajectory files and returns ordinary PyG batches. EquiLoad accelerates CPU-side HDF5 reads and graph construction; models and GPU transfer remain PyTorch's responsibility.
 
-It is deliberately small: EquiLoad accelerates loading. Model execution and GPU transfer remain PyTorch's responsibility.
+## Install from source
 
-## Install from this checkout
-
-EquiLoad is not published to PyPI yet. A Rust compiler is needed only to build it; users of a future wheel will not need Rust.
-
-On Linux, create and activate a Python environment with PyTorch, PyG, and Maturin:
+EquiLoad is currently distributed from source. You need Linux, Rust, a C++20 compiler, and HDF5 development files. On Ubuntu:
 
 ```bash
-uv venv
+sudo apt-get install build-essential libhdf5-dev
+python -m venv .venv
 source .venv/bin/activate
-uv pip install torch torch-geometric maturin
-```
-
-Build and install EquiLoad into that same environment:
-
-```bash
+python -m pip install torch torch-geometric
 bash scripts/install-python.sh
 ```
 
-The installer sources the version-controlled setup helper automatically. You can also source `scripts/setup-equiload-env.sh` directly before running Cargo commands. The helper is safe to source repeatedly. It discovers the active `.venv`, locates the installed PyTorch/LibTorch files, installs a compatible CMake when required, and exports the necessary linker paths. For a CUDA PyTorch build it also prepares the matching CUDA compiler components. It must be sourced because it changes the current shell environment.
+The installer works from any current directory. It discovers the checkout’s virtual environment, configures the matching LibTorch/CUDA build paths, and installs EquiLoad into that environment. It uses `uv` when available and otherwise uses `pip` for any missing build dependencies.
 
-EquiLoad needs an HDF5 development installation at build time. On Ubuntu:
-
-```bash
-sudo apt-get install libhdf5-dev
-```
-
-If HDF5 is installed in a nonstandard prefix, set `HDF5_ROOT` before installing:
+For a custom HDF5 installation, set its prefix before installing:
 
 ```bash
 export HDF5_ROOT=/path/to/hdf5
 bash scripts/install-python.sh
 ```
 
-To create a redistributable wheel instead of installing the checkout:
+## Local wheel
 
 ```bash
 bash scripts/build-wheel.sh
-python -m pip install dist/equiload-*.whl
+python -m pip install --force-reinstall --no-deps dist/equiload-*.whl
 ```
+
+This produces a **local compatibility wheel**, not a universal binary release: build and install it against the same Python, PyTorch ABI, CUDA variant, and HDF5 ABI. A future published release must provide a tested wheel matrix for those combinations.
 
 ## Use with Equitrain
 
-After Equitrain's optional EquiLoad loader integration is installed, select it explicitly:
+After Equitrain’s optional integration is installed, opt in explicitly:
 
 ```bash
 equitrain --backend torch --torch-loader equiload ...
 ```
 
-The normal Python loader remains Equitrain's default, so no Rust toolchain or native extension is required for regular Equitrain installations.
+The Python loader remains Equitrain’s default, so ordinary Equitrain users do not need Rust or EquiLoad.
 
 ## Python API
 
@@ -72,7 +60,7 @@ for batches in loader:
         # train on batch
 ```
 
-`HDF5GraphLoader` produces the same list-of-PyG-`Batch` structure used by Equitrain. It is CPU-side loading and graph construction; `batch.to("cuda")` measures or performs host-to-device transfer separately.
+The supported public API consists only of `HDF5GraphDataset`, `HDF5GraphDatasetCollection`, and `HDF5GraphLoader`.
 
 ## Development
 
@@ -82,7 +70,7 @@ cargo test --workspace --all-features
 python -m pytest crates/equiload-python/tests -q
 ```
 
-The Rust crates are `equiload`, `equiload-sys`, and `equiload-python`. The public Python package and wheel are both named `equiload`.
+`equiload-core` and `equiload-sys` are internal implementation crates and are not published. Development benchmarks live in [benchmarks](benchmarks/README.md); helper scripts live in [tools](tools/README.md).
 
 ## License
 
