@@ -1,0 +1,13 @@
+[package]
+name = "equiload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+hdf5 = ["equiload-sys/hdf5"]
+
+[dependencies]
+half = "2"
+equiload-sys = { path = "../equiload-sys" }

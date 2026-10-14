@@ -12,7 +12,7 @@ FORCE=0
 
 usage() {
   cat <<USAGE
-Download the LibTorch C++ distribution used by RTorch.
+Download the LibTorch C++ distribution used by EquiLoad.
 
 Usage:
   scripts/download-libtorch.sh [--force]

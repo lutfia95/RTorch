@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build and install EquiLoad into the checkout's active/discovered virtual environment.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/setup-equiload-env.sh"
+"${VIRTUAL_ENV}/bin/python" -m maturin develop --release --features hdf5 "$@"

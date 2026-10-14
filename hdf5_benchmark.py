@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import h5py
+import torch
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -48,6 +49,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         help="Interval for Linux RSS/PSS/USS sampling (default: 5 ms).",
     )
     parser.add_argument(
+        "--transfer-device",
+        help="Move every graph batch to this CUDA device and include synchronized transfer time.",
+    )
+    parser.add_argument(
         "--skip-python-heap",
         action="store_true",
         help="Skip the extra pass that profiles Python allocations with tracemalloc.",
@@ -75,6 +80,20 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--repeats must be positive")
     if args.memory_sample_ms <= 0:
         raise ValueError("--memory-sample-ms must be positive")
+
+
+def resolve_transfer_device(value: str | None) -> torch.device | None:
+    if value is None:
+        return None
+    try:
+        device = torch.device(value)
+    except RuntimeError as error:
+        raise ValueError(f"Invalid --transfer-device {value!r}: {error}") from error
+    if device.type != "cuda":
+        raise ValueError("--transfer-device must name a CUDA device, for example cuda or cuda:0")
+    if not torch.cuda.is_available():
+        raise RuntimeError("--transfer-device was supplied but CUDA is not available to PyTorch")
+    return device
 
 
 def resolve_atomic_numbers(args: argparse.Namespace) -> list[int]:
@@ -219,7 +238,12 @@ class PassMetrics:
     python_heap_peak: int | None = None
 
 
-def _consume(loader: Iterable[Any], max_batches: int) -> WorkCounts:
+def _consume(
+    loader: Iterable[Any],
+    max_batches: int,
+    *,
+    transfer_device: torch.device | None = None,
+) -> WorkCounts:
     outer_batches = graph_batches = structures = nodes = edges = 0
     for outer_batch in loader:
         outer_batches += 1
@@ -228,8 +252,12 @@ def _consume(loader: Iterable[Any], max_batches: int) -> WorkCounts:
             structures += int(batch.num_graphs)
             nodes += int(batch.num_nodes)
             edges += int(batch.num_edges)
+            if transfer_device is not None:
+                batch.to(transfer_device, non_blocking=True)
         if max_batches and outer_batches >= max_batches:
             break
+    if transfer_device is not None:
+        torch.cuda.synchronize(transfer_device)
     return WorkCounts(outer_batches, graph_batches, structures, nodes, edges)
 
 
@@ -239,15 +267,18 @@ def measured_pass(
     max_batches: int,
     sample_seconds: float,
     trace_python_heap: bool = False,
+    transfer_device: torch.device | None = None,
 ) -> PassMetrics:
     gc.collect()
+    if transfer_device is not None:
+        torch.cuda.synchronize(transfer_device)
     if trace_python_heap:
         tracemalloc.start()
     before_usage = resource.getrusage(resource.RUSAGE_SELF)
     cpu_start = time.process_time()
     with MemorySampler(sample_seconds) as memory:
         wall_start = time.perf_counter()
-        counts = _consume(loader, max_batches)
+        counts = _consume(loader, max_batches, transfer_device=transfer_device)
         wall_seconds = time.perf_counter() - wall_start
     cpu_seconds = time.process_time() - cpu_start
     after_usage = resource.getrusage(resource.RUSAGE_SELF)
@@ -347,6 +378,7 @@ def run_benchmark(
 ) -> None:
     validate_args(args)
     numbers = resolve_atomic_numbers(args)
+    transfer_device = resolve_transfer_device(args.transfer_device)
     baseline = MemorySnapshot.current()
     init_start = time.perf_counter()
     loader = build_loader(numbers)
@@ -359,14 +391,15 @@ def run_benchmark(
     print(f"Atomic numbers: {numbers}")
     print(
         f"Settings: r_max={args.r_max}, batch_size={args.batch_size}, "
-        f"max_batches={args.max_batches or 'all'}, repeats={args.repeats}"
+        f"max_batches={args.max_batches or 'all'}, repeats={args.repeats}, "
+        f"transfer_device={transfer_device or 'none'}"
     )
     print(f"Loader initialization: {init_seconds:.6f} s")
     print(_memory_line("before", baseline))
     print(_memory_line("after", after_init))
 
     if args.warmup_batches:
-        warmup = _consume(loader, args.warmup_batches)
+        warmup = _consume(loader, args.warmup_batches, transfer_device=transfer_device)
         print(
             f"Warm-up: {warmup.outer_batches} loader batches, "
             f"{warmup.structures} structures"
@@ -378,6 +411,7 @@ def run_benchmark(
             loader,
             max_batches=args.max_batches,
             sample_seconds=args.memory_sample_ms / 1000,
+            transfer_device=transfer_device,
         )
         runs.append(metrics)
         print_pass(f"Run {index + 1}/{args.repeats}", metrics)
@@ -402,6 +436,7 @@ def run_benchmark(
             max_batches=args.max_batches,
             sample_seconds=args.memory_sample_ms / 1000,
             trace_python_heap=True,
+            transfer_device=transfer_device,
         )
         print_pass("Heap profile", heap_profile)
 
@@ -419,6 +454,7 @@ def run_benchmark(
                 "warmup_batches": args.warmup_batches,
                 "repeats": args.repeats,
                 "memory_sample_ms": args.memory_sample_ms,
+                **({"transfer_device": str(transfer_device)} if transfer_device else {}),
             },
             "loader_initialization_seconds": init_seconds,
             "memory_before_loader": asdict(baseline),

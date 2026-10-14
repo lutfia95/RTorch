@@ -6,7 +6,7 @@ import torch
 
 from hdf5_benchmark import add_common_arguments, run_benchmark
 
-#python python_loader_test.py /mnt/e/RTorch/mptraj/train.h5 --r-max 5.0 --batch-size 2 --repeats 5  --json python-results.json
+#python python_loader_test.py /mnt/e/EquiLoad/mptraj/train.h5 --r-max 5.0 --batch-size 2 --repeats 5  --json python-results.json
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)

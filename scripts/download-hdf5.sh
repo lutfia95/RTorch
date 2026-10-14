@@ -11,7 +11,7 @@ FORCE=0
 
 usage() {
   cat <<USAGE
-Download a local HDF5 runtime/development install for RTorch.
+Download a local HDF5 runtime/development install for EquiLoad.
 
 This uses conda, mamba, or micromamba to install HDF5 and libaec into a local
 prefix. HDF5 does not provide a LibTorch-style universal zip archive.
@@ -78,7 +78,7 @@ HDF5 is installed at:
   $HDF5_DIR
 
 Use it with one command:
-  source "$HDF5_DIR/rtorch-env.sh"
+  source "$HDF5_DIR/equiload-env.sh"
 
 Or set the variables manually:
   export HDF5_ROOT="$HDF5_DIR"
@@ -97,9 +97,9 @@ write_env_file() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
     loader_path_var="DYLD_LIBRARY_PATH"
   fi
-  cat >"$HDF5_DIR/rtorch-env.sh" <<EOF
-# Source this file before building or running RTorch with HDF5 support:
-#   source "$HDF5_DIR/rtorch-env.sh"
+  cat >"$HDF5_DIR/equiload-env.sh" <<EOF
+# Source this file before building or running EquiLoad with HDF5 support:
+#   source "$HDF5_DIR/equiload-env.sh"
 export HDF5_ROOT="$HDF5_DIR"
 export LIBTORCH="$REPO_ROOT/third_party/libtorch"
 export $loader_path_var="\$LIBTORCH/lib:\$HDF5_ROOT/lib:\${$loader_path_var:-}"

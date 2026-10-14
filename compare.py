@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare Equitrain/Python and RTorch loader benchmark JSON reports."""
+"""Compare Equitrain/Python and EquiLoad loader benchmark JSON reports."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 
-IMPLEMENTATIONS = ("Python", "RTorch")
-COLORS = {"Python": "#4C78A8", "RTorch": "#F58518"}
+IMPLEMENTATIONS = ("Python", "EquiLoad")
+COLORS = {"Python": "#4C78A8", "EquiLoad": "#F58518"}
 
 
 @dataclass(frozen=True)
@@ -30,13 +30,13 @@ def parse_args() -> argparse.Namespace:
         "--python-50k", type=Path, default=Path("python_50k_results.json")
     )
     parser.add_argument(
-        "--rtorch-50k", type=Path, default=Path("rtorch_50k_results.json")
+        "--equiload-50k", type=Path, default=Path("equiload_50k_results.json")
     )
     parser.add_argument(
         "--python-100k", type=Path, default=Path("python_100k_results.json")
     )
     parser.add_argument(
-        "--rtorch-100k", type=Path, default=Path("rtorch_100k_results.json")
+        "--equiload-100k", type=Path, default=Path("equiload_100k_results.json")
     )
     parser.add_argument(
         "-o",
@@ -95,21 +95,21 @@ def validate_report(path: Path, report: dict[str, Any], expected: int) -> None:
 
 def validate_pair(comparison: Comparison, paths: dict[str, Path]) -> None:
     python_report = comparison.reports["Python"]
-    rtorch_report = comparison.reports["RTorch"]
+    equiload_report = comparison.reports["EquiLoad"]
     python_counts = python_report["runs"][0]["counts"]
-    rtorch_counts = rtorch_report["runs"][0]["counts"]
-    if python_counts != rtorch_counts:
+    equiload_counts = equiload_report["runs"][0]["counts"]
+    if python_counts != equiload_counts:
         raise ValueError(
             f"{comparison.label} reports did different work:\n"
             f"  {paths['Python']}: {python_counts}\n"
-            f"  {paths['RTorch']}: {rtorch_counts}"
+            f"  {paths['EquiLoad']}: {equiload_counts}"
         )
 
     settings_to_match = ("r_max", "batch_size", "max_batches")
     mismatches = [
         name
         for name in settings_to_match
-        if python_report["settings"].get(name) != rtorch_report["settings"].get(name)
+        if python_report["settings"].get(name) != equiload_report["settings"].get(name)
     ]
     if mismatches:
         raise ValueError(
@@ -122,12 +122,12 @@ def collect_comparisons(args: argparse.Namespace) -> list[Comparison]:
         (
             "50k",
             50_000,
-            {"Python": args.python_50k, "RTorch": args.rtorch_50k},
+            {"Python": args.python_50k, "EquiLoad": args.equiload_50k},
         ),
         (
             "100k",
             100_000,
-            {"Python": args.python_100k, "RTorch": args.rtorch_100k},
+            {"Python": args.python_100k, "EquiLoad": args.equiload_100k},
         ),
     )
     comparisons: list[Comparison] = []
@@ -197,7 +197,7 @@ def total_retained_memory(report: dict[str, Any], metric: str) -> float:
 def implementation_centers(index: int, width: float = 0.36) -> dict[str, float]:
     return {
         "Python": index - width / 2,
-        "RTorch": index + width / 2,
+        "EquiLoad": index + width / 2,
     }
 
 
@@ -403,15 +403,15 @@ def print_summary(comparisons: list[Comparison], metric: str) -> None:
     print()
     for comparison in comparisons:
         python_wall = statistics.median(wall_values(comparison.reports["Python"]))
-        rtorch_wall = statistics.median(wall_values(comparison.reports["RTorch"]))
-        print(f"{comparison.label} RTorch speedup: {python_wall / rtorch_wall:.2f}x")
+        equiload_wall = statistics.median(wall_values(comparison.reports["EquiLoad"]))
+        print(f"{comparison.label} EquiLoad speedup: {python_wall / equiload_wall:.2f}x")
 
 
 def make_plot(
     comparisons: list[Comparison], output: Path, metric: str, show: bool
 ) -> None:
     os.environ.setdefault(
-        "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "rtorch-matplotlib-cache")
+        "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "equiload-matplotlib-cache")
     )
     import matplotlib
 
@@ -457,7 +457,7 @@ def make_plot(
         frameon=False,
     )
     figure.suptitle(
-        "Equitrain/Python vs RTorch HDF5 graph-loader benchmark",
+        "Equitrain/Python vs EquiLoad HDF5 graph-loader benchmark",
         fontsize=15,
         fontweight="bold",
         y=0.992,

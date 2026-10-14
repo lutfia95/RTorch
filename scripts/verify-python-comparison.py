@@ -10,7 +10,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'equitrain')]
 import h5py
 import numpy as np
 import torch
-import rtorch
+import equiload
 from equitrain.data.atomic import AtomicNumberTable
 from equitrain.data.format_hdf5 import HDF5GraphDataset
 
@@ -40,7 +40,7 @@ def main():
         for dtype in (torch.float32, torch.float64):
             torch.set_default_dtype(dtype)
             python = HDF5GraphDataset(path, 5., AtomicNumberTable(numbers))
-            native = rtorch.HDF5GraphDataset.from_hdf5_file(str(path), 5., numbers)
+            native = equiload.HDF5GraphDataset.from_hdf5_file(str(path), 5., numbers)
             indices = np.unique(np.linspace(0, len(python) - 1, args.samples, dtype=int))
             tolerances = dict(rtol=1e-5, atol=1e-6) if dtype == torch.float32 else dict(rtol=1e-10, atol=1e-10)
             try:
@@ -59,7 +59,7 @@ def main():
                 python.close()
                 native.close()
             results.append(dict(dataset=filename, dtype=str(dtype), graphs=len(indices)))
-    report = dict(extension=rtorch.__file__, results=results,
+    report = dict(extension=equiload.__file__, results=results,
                   total_graphs=sum(r['graphs'] for r in results),
                   checks='Matching field names and values, normalized edges, unit shifts and Cartesian shifts')
     args.json.parent.mkdir(parents=True, exist_ok=True)

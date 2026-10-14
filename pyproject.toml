@@ -3,12 +3,13 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "rtorch"
+name = "equiload"
 dynamic = ["version"]
-description = "Python bindings for RTorch tensor loading"
+description = "Python bindings for EquiLoad tensor loading"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
+dependencies = ["torch", "torch-geometric"]
 
 [tool.maturin]
-manifest-path = "crates/rtorch-python/Cargo.toml"
-module-name = "rtorch"
+manifest-path = "crates/equiload-python/Cargo.toml"
+module-name = "equiload"
