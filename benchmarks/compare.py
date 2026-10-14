@@ -15,6 +15,7 @@ from typing import Any
 
 IMPLEMENTATIONS = ("Python", "EquiLoad")
 COLORS = {"Python": "#4C78A8", "EquiLoad": "#F58518"}
+RESULTS = Path(__file__).resolve().parent / "results"
 
 
 @dataclass(frozen=True)
@@ -27,22 +28,22 @@ class Comparison:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--python-50k", type=Path, default=Path("python_50k_results.json")
+        "--python-50k", type=Path, default=RESULTS / "python_50k_results.json"
     )
     parser.add_argument(
-        "--equiload-50k", type=Path, default=Path("equiload_50k_results.json")
+        "--equiload-50k", type=Path, default=RESULTS / "equiload_50k_results.json"
     )
     parser.add_argument(
-        "--python-100k", type=Path, default=Path("python_100k_results.json")
+        "--python-100k", type=Path, default=RESULTS / "python_100k_results.json"
     )
     parser.add_argument(
-        "--equiload-100k", type=Path, default=Path("equiload_100k_results.json")
+        "--equiload-100k", type=Path, default=RESULTS / "equiload_100k_results.json"
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        default=Path("loader_comparison.png"),
+        default=RESULTS / "loader_comparison.png",
         help="Output image (default: loader_comparison.png)",
     )
     parser.add_argument(

@@ -5,7 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 source "$repo_root/scripts/setup-equiload-env.sh"
-source "$repo_root/scripts/internal/ensure-build-tools.sh"
+source "$repo_root/scripts/internal/ensure-maturin.sh"
 equiload_python="${EQUILOAD_PYTHON:-$VIRTUAL_ENV/bin/python}"
 export PATH="$HOME/.cargo/bin:$PATH"
 export LIBTORCH="${LIBTORCH:-$("$equiload_python" -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent)')}"
@@ -15,5 +15,3 @@ export EQUILOAD_CXX11_ABI="${EQUILOAD_CXX11_ABI:-$("$equiload_python" -c 'import
 # when using a custom prefix.
 "$equiload_python" -m maturin build --release --features hdf5 --skip-auditwheel --interpreter "$equiload_python" \
     --out "$repo_root/dist" "$@"
-find "$repo_root/dist" -maxdepth 1 -type f -name "equiload-*.whl" -exec \
-    "$equiload_python" "$repo_root/scripts/internal/relocate-local-wheel.py" {} \;

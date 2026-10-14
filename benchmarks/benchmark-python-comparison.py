@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,13 @@ CASES = (
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def equiload_extension_path() -> Path:
+    spec = importlib.util.find_spec("equiload.equiload")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("The installed equiload extension could not be located")
+    return Path(spec.origin).resolve()
 
 
 def equitrain_source_root() -> Path:
@@ -99,7 +107,7 @@ def summarize(
     sources = (
         BENCHMARKS / "python_loader_test.py", BENCHMARKS / "equiload_test.py", BENCHMARKS / "hdf5_benchmark.py",
         equitrain_root / "data/backend_torch/loaders_impl.py",
-        equitrain_root / "data/format_hdf5/dataset.py", ROOT / "equiload.so",
+        equitrain_root / "data/format_hdf5/dataset.py", equiload_extension_path(),
     )
     return dict(
         pairs=pairs,
@@ -151,7 +159,7 @@ def plot(summary: dict, output: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, default=ROOT / "../../mptraj")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "python_comparison_results")
+    parser.add_argument("--output-dir", type=Path, default=BENCHMARKS / "results")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--transfer-device", help="Move every graph batch to this CUDA device during timing.")
     parser.add_argument("--implementations", nargs="+", choices=("python", "equiload"), default=("python", "equiload"),

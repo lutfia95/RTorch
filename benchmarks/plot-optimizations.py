@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--results-dir', type=Path, default=Path('optimization_results'))
+parser.add_argument('--results-dir', type=Path, default=Path(__file__).resolve().parent / 'results')
 args = parser.parse_args()
 summary = json.loads((args.results_dir / 'summary.json').read_text())
 rows = sorted(summary['matrix'], key=lambda r: (r['dataset'] != 'train.h5', r['shuffle'], r['batch_size']))

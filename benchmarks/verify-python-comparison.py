@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset-dir', type=Path, default=ROOT / '../../mptraj')
     parser.add_argument('--samples', type=int, default=128)
-    parser.add_argument('--json', type=Path, default=ROOT / 'python_comparison_results/parity.json')
+    parser.add_argument('--json', type=Path, default=Path(__file__).resolve().parent / 'results/parity.json')
     args = parser.parse_args()
     if args.samples < 1:
         parser.error('samples must be positive')
