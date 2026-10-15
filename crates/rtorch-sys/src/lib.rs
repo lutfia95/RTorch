@@ -77,6 +77,12 @@ pub struct RtHdf5GraphStructure {
     pub stress_weight: f32,
     pub virials_weight: f32,
     pub dipole_weight: f32,
+    pub total_charge: f64,
+    pub total_spin: f64,
+    pub external_field: [f64; 3],
+    pub source_id: i32,
+    pub reaction_id: i64,
+    pub state_id: i32,
 }
 
 impl Default for RtHdf5GraphStructure {
@@ -95,6 +101,12 @@ impl Default for RtHdf5GraphStructure {
             stress_weight: 0.0,
             virials_weight: 0.0,
             dipole_weight: 0.0,
+            total_charge: 0.0,
+            total_spin: 1.0,
+            external_field: [0.0; 3],
+            source_id: 0,
+            reaction_id: -1,
+            state_id: -1,
         }
     }
 }
@@ -137,7 +149,21 @@ unsafe extern "C" {
     pub fn rt_tensor_scalar_type(tensor: *const RtTensor) -> c_int;
     pub fn rt_tensor_requires_grad(tensor: *const RtTensor) -> bool;
     pub fn rt_tensor_set_requires_grad(tensor: *mut RtTensor, requires_grad: bool) -> bool;
+    pub fn rt_tensor_from_owned_data(
+        data: *mut c_void,
+        len: usize,
+        scalar_type: i32,
+        shape: *const i64,
+        shape_len: usize,
+        owner: *mut c_void,
+        release_owner: unsafe extern "C" fn(*mut c_void),
+    ) -> *mut RtTensor;
     pub fn rt_tensor_copy_f32(tensor: *const RtTensor, out: *mut f32, out_len: usize) -> bool;
+    pub fn rt_tensor_dataset_read_hdf5_slice(
+        dataset: *const RtTensorDataset,
+        offset: u64,
+        length: u64,
+    ) -> *mut RtTensor;
     pub fn rt_tensor_copy_f64(tensor: *const RtTensor, out: *mut f64, out_len: usize) -> bool;
     pub fn rt_tensor_copy_i64(tensor: *const RtTensor, out: *mut i64, out_len: usize) -> bool;
     pub fn rt_tensor_add(left: *const RtTensor, right: *const RtTensor) -> *mut RtTensor;

@@ -8,6 +8,10 @@ publish = false
 [lib]
 name = "rtorch"
 crate-type = ["cdylib"]
+# This crate is tested through Python (pytest).  Building a Rust test binary
+# for an extension-module crate omits libpython and fails to link PyO3 symbols.
+test = false
+doctest = false
 
 [features]
 default = []

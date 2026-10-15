@@ -10,19 +10,40 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH");
     println!("cargo:rerun-if-env-changed=HDF5_ROOT");
     println!("cargo:rerun-if-env-changed=HDF5_DIR");
+    println!("cargo:rerun-if-env-changed=RTORCH_CPU_BRIDGE");
+    println!("cargo:rerun-if-env-changed=RTORCH_CXX11_ABI");
     println!("cargo:rerun-if-changed=ffi");
 
     let mut cmake = cmake::Config::new("ffi");
     cmake
         .define("CMAKE_PREFIX_PATH", &libtorch_path)
+        // CMake caches Torch_DIR. Override it explicitly so changing LIBTORCH
+        // cannot silently keep headers and ABI flags from an earlier build.
+        .define("Torch_DIR", libtorch_path.join("share/cmake/Torch"))
         .define("CMAKE_CXX_STANDARD", "17");
     let hdf5_enabled = env::var_os("CARGO_FEATURE_HDF5").is_some();
+    cmake.define(
+        "RTORCH_CPU_BRIDGE",
+        if env::var("RTORCH_CPU_BRIDGE").as_deref() == Ok("1") {
+            "ON"
+        } else {
+            "OFF"
+        },
+    );
     cmake.define(
         "RTORCH_ENABLE_HDF5",
         if hdf5_enabled { "ON" } else { "OFF" },
     );
     if let Ok(hdf5_root) = env::var("HDF5_ROOT") {
-        cmake.define("HDF5_ROOT", hdf5_root);
+        cmake.define("HDF5_ROOT", &hdf5_root);
+        // FindHDF5 caches library/include paths independently of HDF5_ROOT.
+        // Keep explicit Linux roots consistent when switching installations.
+        let root = PathBuf::from(&hdf5_root);
+        let library = root.join("lib/libhdf5.so");
+        if library.is_file() && root.join("include/hdf5.h").is_file() {
+            cmake.define("HDF5_hdf5_LIBRARY_RELEASE", library);
+            cmake.define("HDF5_C_INCLUDE_DIR", root.join("include"));
+        }
     }
     if let Ok(hdf5_dir) = env::var("HDF5_DIR") {
         cmake.define("HDF5_DIR", hdf5_dir);

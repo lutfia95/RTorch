@@ -272,11 +272,152 @@ construction, shuffling, and dynamic packing run in Rust/PyO3. It requires the
 `hdf5` feature and Python packages `torch` and `torch-geometric`; `niggli_reduce`
 is not implemented in the RTorch path yet.
 
+Direct HDF5 loading reads structure offsets on demand with a bounded 4,096-row
+buffer per atom-array reader. Graph metadata also uses a bounded buffer (at most
+4,096 rows), so opening a large file does not materialize all structure records.
+Sequential graph loading (`shuffle=False`) uses a cursor without allocating an
+index for every structure. Shuffling still requires an O(number of structures)
+permutation. Malformed offsets are validated when their block is first read.
+These bounds cover RTorch's metadata buffers; process RSS also includes PyTorch,
+PyG, HDF5 caches, and the current graph batch. Class-folder loading still builds
+its file/sample index eagerly.
+
 After installing the extension with `maturin develop`, run the Python smoke test:
 
 ```bash
 python -m unittest crates/rtorch-python/tests/test_import_dataloader.py
 ```
+
+To verify neighbor parity against Equitrain/Matscipy and measure end-to-end
+HDF5 graph-construction throughput on representative data:
+
+```bash
+python crates/rtorch/examples/python/equitrain_graph_benchmark.py \
+  path/to/train.h5 --r-max 5.0 --verify
+```
+
+The benchmark alternates implementation order across repeated passes and reports
+runtime, structures per second, full-process peak RSS, peak RSS growth, and the
+median RTorch speedup. RSS is sampled every 10 ms by default; use
+`--memory-sample-ms` to change the interval.
+
+For independent runtime and detailed memory profiles, run the two root-level
+benchmarks in separate processes with exactly the same arguments:
+
+```bash
+python rtorch_test.py path/to/train.h5 --r-max 5.0 --batch-size 2 \
+  --repeats 5 --json rtorch-results.json
+python python_loader_test.py path/to/train.h5 --r-max 5.0 --batch-size 2 \
+  --repeats 5 --json python-results.json
+```
+
+Both scripts report wall and CPU time, structures/nodes/edges processed, sampled
+RSS/PSS/USS/shared/swap memory, page faults, I/O blocks, context switches, and a
+separate Python-heap profiling pass. The heap pass uses `tracemalloc` and is
+excluded from the runtime summary. Use `--skip-python-heap` to omit it and
+`--max-batches` for a short trial. The Python benchmark uses the local
+`equitrain/` checkout when present; install its requirements with:
+
+```bash
+python -m pip install -e './equitrain[torch]'
+```
+
+To compare the local Python implementation with the current native extension
+across small runs, 50k/100k training runs, full validation, and larger batches:
+
+```bash
+python scripts/benchmark-python-comparison.py --dataset-dir ../../mptraj
+```
+
+This runs each loader in a fresh process without overlapping timed runs, using
+two passes, one warmup batch, and 250 ms memory sampling. It saves all reports,
+logs, a summary, and a plot in `python_comparison_results/`. The summary checks
+matching structures, nodes, edges, atomic-number tables, and settings. Memory
+includes Python and imported libraries; both sampled RSS and process high-water
+memory are reported. Use `--output-dir` for a separate result directory, or
+`--resume` to reuse completed reports from an interrupted run.
+
+Check sampled graph values against the same Python checkout with
+`python scripts/verify-python-comparison.py`. This checks 128 structures spread
+through each file in float32 and float64, including every returned field and
+normalized neighbor lists and shifts.
+
+### Native graph loader runtime and memory
+
+Build a release extension against the active Python's PyTorch:
+
+```bash
+RTORCH_PYTHON=python bash scripts/build-python.sh
+```
+
+The script writes `rtorch.so` for scripts in this checkout and a wheel under
+`optimization_results/wheels/`. Set `HDF5_ROOT` if HDF5 is installed elsewhere.
+It uses the matching PyTorch CPU tensor libraries and C++ ABI, so a CUDA-enabled
+PyTorch wheel does not require a CUDA compiler to build this CPU loader. Set
+`RTORCH_CPU_BRIDGE=0` to use the standard Torch CMake configuration instead.
+
+`HDF5GraphLoader` prepares graphs and assembles final tensors natively, without
+calling `Batch.from_data_list`. The returned objects remain PyG `Batch` objects,
+including slicing metadata for `get_example()` and `to_data_list()`. Positions
+and their `positions` alias share storage. Graph geometry and cutoff decisions
+use float64 and the Python neighbor list's strict distance < cutoff rule;
+output fields follow `torch.get_default_dtype()`. Rust vectors are
+transferred into tensor storage with lifetime-managed ownership; that external
+storage cannot be resized in place.
+
+Sequential atom reads use bounded read-ahead (at most 4,096 rows and 256 KiB per
+field). Shuffled reads use the structure metadata's offsets directly and avoid
+three redundant reads of the offset table. HDF5 metadata caches are capped at
+8 MiB per file, with 256 KiB raw chunk caches per dataset. Public tensor samples
+own independent storage, so mutating a sample cannot corrupt cached file data.
+No graphs or whole-dataset atom arrays are cached across epochs. `dataset.close()`
+releases file handles and caches; subsequent reads raise a closed-dataset error,
+while retained batches remain valid. Temporary graph buffers are consumed one
+graph at a time during batch assembly; node/edge limits are applied while
+preparing an outer batch. Shuffling still requires an index vector proportional
+to dataset length, and retaining returned batches uses additional caller memory.
+
+Graph outputs include the Python loader's charge, spin, external field, source,
+reaction and state IDs, signed volume, reciprocal cell, and zero Fermi level.
+Older HDF5 schemas use the same defaults as Python for missing metadata fields.
+
+Measure sequential and shuffled training, full validation, and batch sizes 2/32:
+
+```bash
+python benchmark_optimizations.py --json optimization_results/after.json
+python benchmark_optimizations.py --case full-train --repeats 1 \
+  --json optimization_results/full_train.json
+```
+
+The default data directory is `../../mptraj`; change it with `--dataset-dir`.
+Use `--case large-batch --repeats 1` for a memory stress test (16,384 structures
+in batches of 8,192). Use `--extension /path/to/preserved/rtorch.so` for a before/after comparison
+without modifying the installed Python package. Reports include work counts,
+wall/CPU time, RSS/PSS/USS, process high-water memory, and full-epoch progress.
+
+### PyTorch/LibTorch symbol errors
+
+The RTorch extension and the PyTorch imported by Python must use the same
+PyTorch version, CUDA/CPU variant, and C++ ABI. Mixing packages can produce an
+error such as:
+
+```text
+ImportError: .../libc10_cuda.so: undefined symbol: ...torchCheckFail...
+```
+
+For the Python extension, build against the active Python `torch` package rather
+than placing an unrelated standalone LibTorch first in `LD_LIBRARY_PATH`:
+
+```bash
+export LIBTORCH="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent)')"
+export HDF5_ROOT="$PWD/third_party/hdf5"
+export LD_LIBRARY_PATH="$HDF5_ROOT/lib:${LD_LIBRARY_PATH:-}"
+python -m maturin develop --release --features hdf5
+```
+
+Importing `torch` before `rtorch` is still recommended. Do not add
+`third_party/libtorch/lib` to `LD_LIBRARY_PATH` for this Python build; doing so
+can replace PyTorch's own `libc10.so` at runtime with an incompatible copy.
 
 ## Add RTorch To Another Rust Project
 
@@ -681,5 +822,3 @@ Common failure cases:
 - tensor shapes in a batch are incompatible
 - transform shape requirements are not met
 - `batch_size` is zero
-
-
