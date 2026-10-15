@@ -10,8 +10,9 @@
 # Missing Python packages are installed with uv pip, without editing uv.lock or
 # pyproject.toml. Install your project's pinned dependencies with uv sync first.
 # Existing torch is retained; absent torch is installed using uv's configured
-# indexes. CUDA compiler packages follow torch.version.cuda (not nvidia-smi).
-# Automatic pip-only CUDA setup requires CUDA 13+; older CUDA needs --cuda-root.
+# indexes. EquiLoad's normal CPU bridge does not need a CUDA toolkit, even
+# when the installed Torch build is CUDA-enabled. CUDA setup is performed only
+# when explicitly requested with --cuda-root or when --check needs nvcc.
 # No GPU is needed for --check. A system C/C++ compiler is still required.
 #
 # References:
@@ -53,11 +54,10 @@ Usage: source scripts/setup-equiload-env.sh [options]
 
 Discovery: --venv, then VIRTUAL_ENV, then .venv in the current directory or
 its parents, then .venv beside this script or in its parents.
-Exports include LIBTORCH, Torch_DIR, CUDA_HOME, CUDACXX and the build/library
-search paths. Existing TORCH_CUDA_ARCH_LIST is preserved. Re-sourcing is safe.
-Linux/Bash only. Uses uv when available, otherwise pip. CPU-only torch skips CUDA setup.
-CUDA 13+ compiler components can be installed via pip; older CUDA requires
-an existing full toolkit passed with --cuda-root. Project files are not edited.
+Exports include LIBTORCH, Torch_DIR, and the build/library search paths. CUDA
+paths are exported only with --cuda-root or --check. Existing
+TORCH_CUDA_ARCH_LIST is preserved. Re-sourcing is safe. Linux/Bash only. Uses
+uv when available, otherwise pip. Project files are not edited.
 HELP
                 return 0 ;;
             *) printf 'Unknown option: %s (see --help)\n' "$1" >&2; return 2 ;;
@@ -251,7 +251,12 @@ def main():
     if hdf5_root and (hdf5_root / 'lib').is_dir():
         libs.append(hdf5_root / 'lib')
     bins = [VENV / 'bin']
-    if series:
+    # The native extension deliberately uses EquiLoad's CPU bridge. A CUDA
+    # Torch wheel supplies the required CPU headers/libraries, so requiring
+    # nvcc here would make ordinary GPU training environments needlessly hard
+    # to use. Keep the heavyweight CUDA setup for an explicit toolkit request
+    # or the opt-in CUDA diagnostic only.
+    if series and (EXTERNAL or CHECK):
         if not re.fullmatch(r'\d+\.\d+', series):
             fail(f'Unrecognized torch.version.cuda: {series!r}')
         major = int(series.split('.')[0])
@@ -303,6 +308,8 @@ def main():
         note(f'CUDA toolkit: {root}')
     elif EXTERNAL:
         fail('--cuda-root was supplied, but this PyTorch installation is CPU-only.')
+    elif series:
+        note('CUDA toolkit setup skipped: EquiLoad builds its CPU bridge.')
 
     prepend('PATH', bins)
     for key in ('LD_LIBRARY_PATH', 'LIBRARY_PATH', 'CMAKE_LIBRARY_PATH'):

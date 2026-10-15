@@ -58,6 +58,23 @@ class NativeGraphBatchTest(unittest.TestCase):
         finally:
             torch.set_default_dtype(old_dtype)
 
+    def test_cell_volume_is_always_float64(self):
+        """Match Equitrain's NumPy/ASE-derived cell-volume metadata."""
+        old_dtype = torch.get_default_dtype()
+        try:
+            for dtype in (torch.float32, torch.float64):
+                torch.set_default_dtype(dtype)
+                dataset = equiload.HDF5GraphDataset.from_hdf5_file(
+                    str(self.fixture), 5.0, self.numbers
+                )
+                self.assertIsInstance(dataset[0].cell_volume, np.float64)
+                loader = equiload.HDF5GraphLoader.from_hdf5_file(
+                    str(self.fixture), 5.0, self.numbers, batch_size=2
+                )
+                self.assertEqual(next(iter(loader))[0].cell_volume.dtype, torch.float64)
+        finally:
+            torch.set_default_dtype(old_dtype)
+
     def test_dynamic_splitting_dropping_and_retained_batches(self):
         dataset = equiload.HDF5GraphDataset.from_hdf5_file(str(self.fixture), 5.0, self.numbers)
         graphs = [dataset[i] for i in range(len(dataset))]

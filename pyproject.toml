@@ -10,6 +10,7 @@ requires-python = ">=3.9"
 license = { file = "LICENSE" }
 readme = "README.md"
 dependencies = [
+    "numpy>=1.21",
     "torch>=2.6,<2.15",
     "torch-geometric>=2.5",
 ]
@@ -28,32 +29,7 @@ Repository = "https://github.com/lutfia95/RTorch"
 [tool.maturin]
 manifest-path = "crates/equiload-python/Cargo.toml"
 module-name = "equiload"
-# Checkout builds are intentionally tagged only for the host.  The release
-# workflow below repairs its wheels with Auditwheel after bundling HDF5.
+# The extension links to PyTorch's C++ libraries. A source build is therefore
+# made in the target environment and is the supported distribution mechanism.
 compatibility = "linux"
 auditwheel = "skip"
-
-[tool.cibuildwheel]
-# Keep the published matrix deliberately small and supportable.  Python 3.9
-# remains source-installable, but PyTorch's current binary support makes it a
-# poor target for a pre-built native wheel.
-build = "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64"
-skip = "*-musllinux_*"
-test-requires = ["pytest", "h5py"]
-test-command = [
-    "python -c \"import equiload; print(equiload.__file__)\"",
-    "python -m pytest {project}/crates/equiload-python/tests -q",
-]
-test-environment = { PYTHONSAFEPATH = "1" }
-
-[tool.cibuildwheel.linux]
-# PyTorch's current Linux wheels require the glibc 2.28 baseline. HDF5 is
-# vendored by Auditwheel; PyTorch's three C++ libraries deliberately remain
-# external and are resolved from the user's installed torch package.
-manylinux-x86_64-image = "manylinux_2_28"
-before-all = [
-    "dnf install -y hdf5-devel curl",
-    "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal",
-]
-environment = { PATH = "/root/.cargo/bin:$PATH" }
-repair-wheel-command = "auditwheel repair --exclude libtorch.so --exclude libtorch_cpu.so --exclude libc10.so -w {dest_dir} {wheel}"

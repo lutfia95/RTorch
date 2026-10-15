@@ -1221,7 +1221,11 @@ struct BatchBuffers<T> {
     atomic_numbers: Vec<i64>,
     node_attrs: Vec<T>,
     cell: Vec<T>,
-    volume: Vec<T>,
+    // Equitrain obtains this from ASE's `Cell.volume`, which is a NumPy
+    // float64. PyG preserves that type when collating, independently of
+    // Torch's default dtype. Keep the same contract here: models may inspect
+    // metadata fields in addition to the default-dtype model inputs.
+    cell_volume: Vec<f64>,
     signed_volume: Vec<T>,
     rcell: Vec<T>,
     total_charge: Vec<T>,
@@ -1255,7 +1259,7 @@ impl<T: BatchFloat> BatchBuffers<T> {
             atomic_numbers: Vec::with_capacity(nodes),
             node_attrs: Vec::with_capacity(nodes * species_count),
             cell: Vec::with_capacity(count * 9),
-            volume: Vec::with_capacity(count),
+            cell_volume: Vec::with_capacity(count),
             signed_volume: Vec::with_capacity(count),
             rcell: Vec::with_capacity(count * 9),
             total_charge: Vec::with_capacity(count),
@@ -1299,8 +1303,7 @@ impl<T: BatchFloat> BatchBuffers<T> {
         }
         self.cell
             .extend(graph.neighborhood.cell.iter().map(|v| T::from_f64(*v)));
-        self.volume
-            .push(T::from_f64(determinant(&graph.entry.cell).abs()));
+        self.cell_volume.push(determinant(&graph.entry.cell).abs());
         let signed_volume = determinant(&graph.entry.cell);
         self.signed_volume.push(T::from_f64(signed_volume));
         let reciprocal = if signed_volume.abs() <= 1e-10 {
@@ -1385,7 +1388,7 @@ fn finish_graph_buffers<T: BatchFloat>(
         atomic_numbers,
         node_attrs,
         cell,
-        volume,
+        cell_volume,
         signed_volume,
         rcell,
         total_charge,
@@ -1466,15 +1469,27 @@ fn finish_graph_buffers<T: BatchFloat>(
     )?;
     let module = py.import_bound("torch_geometric.data")?;
     if !batch {
-        kwargs.set_item("cell_volume", single_volume)?;
+        // Equitrain forwards ASE's NumPy float64 value for an individual
+        // graph. Retain that type as well as the batched torch.float64
+        // contract below, so native datasets and loaders are interchangeable
+        // with their portable counterparts.
+        let numpy = py.import_bound("numpy")?;
+        kwargs.set_item(
+            "cell_volume",
+            numpy.getattr("float64")?.call1((single_volume,))?,
+        )?;
         kwargs.set_item("y", scalar_float_tensor(py, single_energy, dtype)?)?;
         kwargs.set_item("natoms", nodes)?;
         kwargs.set_item("idx", indices[0])?;
         return Ok(module.getattr("Data")?.call((), Some(&kwargs))?.into_py(py));
     }
+    // This intentionally does not use `dtype`: the portable Equitrain loader
+    // produces cell_volume from NumPy/ASE as float64 regardless of
+    // torch.get_default_dtype().
+    let cell_volume_dtype = py.import_bound("torch")?.getattr("float64")?;
     kwargs.set_item(
         "cell_volume",
-        batch_float_tensor(py, volume, &[count], dtype)?,
+        batch_float_tensor(py, cell_volume, &[count], &cell_volume_dtype)?,
     )?;
     kwargs.set_item("y", batch_float_tensor(py, energy, &[count], dtype)?)?;
     kwargs.set_item("natoms", i64_tensor(py, natoms, &[count])?)?;

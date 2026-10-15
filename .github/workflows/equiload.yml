@@ -102,8 +102,11 @@ jobs:
           python -m venv /tmp/equiload-sdist-test
           . /tmp/equiload-sdist-test/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install h5py pytest torch torch-geometric
-          python -m pip install --no-deps dist/equiload-*.tar.gz
+          # Build from source in the target environment. Build isolation could
+          # select a different Torch release and produce an ABI-incompatible
+          # extension even when the runtime dependency range is satisfied.
+          python -m pip install maturin h5py pytest torch torch-geometric
+          python -m pip install --no-build-isolation --no-deps dist/equiload-*.tar.gz
           python -m pytest crates/equiload-python/tests -q
           python -c "import equiload; print(equiload.__file__)"
 

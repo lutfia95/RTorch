@@ -2,19 +2,28 @@
 
 EquiLoad is an optional native HDF5 graph loader for [Equitrain](https://github.com/lutfia95/equitrain) and PyTorch Geometric. It reads Equitrain trajectory files and returns ordinary PyG batches. EquiLoad accelerates CPU-side HDF5 reads and graph construction; models and GPU transfer remain PyTorch's responsibility.
 
-## Install from source
+## Install
 
 EquiLoad is a CPU-side native extension: it loads HDF5 data and builds CPU PyG batches. Install your preferred PyTorch build first (including CUDA when Equitrain trains on a GPU), then install EquiLoad. The loader itself needs no CUDA toolkit or GPU.
 
-A source install needs Linux, Rust, a C++20 compiler, and HDF5 development files. On Ubuntu:
+A source installation is required: EquiLoad's native extension links against
+PyTorch's C++ ABI, which is not stable across Torch releases. It must be built
+against the exact Torch installation Equitrain will use. EquiLoad is therefore
+distributed from its source repository, not as a generic PyPI wheel or sdist.
+A source install needs Linux, Rust, a C++20 compiler, and HDF5 development
+files. On Ubuntu:
 
 ```bash
 sudo apt-get install build-essential libhdf5-dev
-python -m pip install torch torch-geometric
-python -m pip install equiload
+python -m pip install 'equitrain[torch]'
+git clone https://github.com/lutfia95/RTorch.git equiload
+cd equiload
+bash scripts/install-python.sh --venv /path/to/equitrain/.venv
 ```
 
-For a checkout or a pre-installed CUDA Torch, use the included installer; it builds against the active environment's exact Torch ABI:
+When EquiLoad lives beside the active virtual environment, the installer can
+discover it automatically. It builds against the environment's exact Torch
+ABI:
 
 ```bash
 bash scripts/install-python.sh
@@ -27,19 +36,7 @@ export HDF5_ROOT=/path/to/hdf5
 bash scripts/install-python.sh
 ```
 
-## Wheels
-
-Published Linux wheels are built in a `manylinux_2_28` container for CPython
-3.10–3.13 on x86_64. They bundle HDF5, so no system HDF5 installation is
-needed. PyTorch is deliberately not bundled: install the Torch build you use
-for Equitrain first (CPU or CUDA), then install EquiLoad. EquiLoad itself stays
-CPU-side; PyTorch moves returned batches to the GPU.
-
-The wheel workflow tests the repaired, installed wheel and leaves `libtorch`,
-`libtorch_cpu`, and `libc10` to the installed `torch` package. This preserves
-the user's CUDA choice and avoids shipping a duplicate multi-gigabyte PyTorch.
-
-### Development wheel
+### Local development wheel
 
 ```bash
 bash scripts/build-wheel.sh
@@ -47,9 +44,10 @@ python -m pip install --force-reinstall --no-deps dist/equiload-*.whl
 ```
 
 This produces a **local compatibility wheel**, tagged `linux_x86_64`; do not
-upload it to PyPI. It uses the local HDF5 and is only suitable for the
-environment that built it. Use the manylinux workflow artifact for a
-publishable wheel.
+upload or share it. It works only with the exact Torch ABI used to build it.
+EquiLoad does not publish generic binary wheels because such a wheel can fail
+to import with another supported Torch release. EquiLoad remains CPU-side;
+PyTorch moves returned batches to the GPU.
 
 ## Use with Equitrain
 
