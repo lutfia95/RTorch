@@ -10,5 +10,11 @@ description = "Native HDF5 graph loader for Equitrain and PyTorch Geometric"
 repository = "https://github.com/lutfia95/RTorch"
 homepage = "https://github.com/lutfia95/RTorch"
 
+[workspace.dependencies]
+# These crates stay private, but explicit versions keep their package archives
+# well-formed and make the shared release version the single source of truth.
+equiload-core = { version = "0.1.0", path = "crates/equiload-core" }
+equiload-sys = { version = "0.1.0", path = "crates/equiload-sys" }
+
 [workspace.metadata.equiload]
 libtorch-dir-env = "LIBTORCH"

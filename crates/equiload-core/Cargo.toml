@@ -14,4 +14,4 @@ hdf5 = ["equiload-sys/hdf5"]
 
 [dependencies]
 half = "2"
-equiload-sys = { path = "../equiload-sys" }
+equiload-sys.workspace = true
