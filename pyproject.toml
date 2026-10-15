@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
+requires = ["maturin>=1.5,<2", "torch>=2.6,<2.15"]
 build-backend = "maturin"
 
 [project]
@@ -23,8 +23,10 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/lutfia95/EquiLoad"
+Repository = "https://github.com/lutfia95/RTorch"
 
 [tool.maturin]
 manifest-path = "crates/equiload-python/Cargo.toml"
 module-name = "equiload"
+compatibility = "linux"
+auditwheel = "skip"

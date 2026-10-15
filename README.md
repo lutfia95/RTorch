@@ -4,17 +4,21 @@ EquiLoad is an optional native HDF5 graph loader for [Equitrain](https://github.
 
 ## Install from source
 
-EquiLoad is currently distributed from source. You need Linux, Rust, a C++20 compiler, and HDF5 development files. On Ubuntu:
+EquiLoad is a CPU-side native extension: it loads HDF5 data and builds CPU PyG batches. Install your preferred PyTorch build first (including CUDA when Equitrain trains on a GPU), then install EquiLoad. The loader itself needs no CUDA toolkit or GPU.
+
+A source install needs Linux, Rust, a C++20 compiler, and HDF5 development files. On Ubuntu:
 
 ```bash
 sudo apt-get install build-essential libhdf5-dev
-python -m venv .venv
-source .venv/bin/activate
 python -m pip install torch torch-geometric
-bash scripts/install-python.sh
+python -m pip install equiload
 ```
 
-The installer works from any current directory. It discovers the checkout’s virtual environment, configures the matching LibTorch/CUDA build paths, and installs EquiLoad into that environment. It uses `uv` when available and otherwise uses `pip` for any missing build dependencies.
+For a checkout or a pre-installed CUDA Torch, use the included installer; it builds against the active environment's exact Torch ABI:
+
+```bash
+bash scripts/install-python.sh
+```
 
 For a custom HDF5 installation, set its prefix before installing:
 

@@ -6,6 +6,9 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 version = "0.1.0"
+description = "Native HDF5 graph loader for Equitrain and PyTorch Geometric"
+repository = "https://github.com/lutfia95/RTorch"
+homepage = "https://github.com/lutfia95/RTorch"
 
 [workspace.metadata.equiload]
 libtorch-dir-env = "LIBTORCH"

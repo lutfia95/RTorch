@@ -10,74 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust builds
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake curl unzip libhdf5-dev python3-h5py
-
-      - name: Install LibTorch
-        run: |
-          bash scripts/download-libtorch.sh
-          echo "LIBTORCH=${GITHUB_WORKSPACE}/third_party/libtorch" >> "${GITHUB_ENV}"
-          echo "LD_LIBRARY_PATH=${GITHUB_WORKSPACE}/third_party/libtorch/lib:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check default feature build
-        run: cargo check --workspace --no-default-features
-
-      - name: Build
-        run: cargo build --workspace --all-features --verbose
-
-      - name: Run tests
-        run: cargo test --workspace --all-features --verbose
-
-      - name: Run C ABI tests
-        run: |
-          cmake -S crates/equiload-sys/ffi -B build/ffi-tests \
-            -DCMAKE_PREFIX_PATH="${LIBTORCH}" \
-            -DEQUILOAD_ENABLE_HDF5=ON \
-            -DEQUILOAD_BUILD_TESTS=ON
-          cmake --build build/ffi-tests
-          ctest --test-dir build/ffi-tests --output-on-failure
-
-      - name: Create HDF5 smoke fixture
-        run: |
-          mkdir -p ci_data
-          python3 - <<'PY'
-          import h5py
-          import numpy as np
-
-          with h5py.File("ci_data/train.h5", "w") as f:
-              f.create_dataset(
-                  "positions",
-                  data=np.array(
-                      [
-                          [0.0, 1.0, 2.0],
-                          [3.0, 4.0, 5.0],
-                          [6.0, 7.0, 8.0],
-                          [9.0, 10.0, 11.0],
-                      ],
-                      dtype=np.float64,
-                  ),
-              )
-          PY
-
-
-  python-wheel:
+  native:
     runs-on: ubuntu-latest
 
     steps:
@@ -87,26 +20,96 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libhdf5-dev
+
+      - name: Install Python Torch
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install torch
+
+      - name: Configure LibTorch for the C ABI test
+        run: |
+          . .venv/bin/activate
+          torch_root="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent)')"
+          torch_abi="$(python -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')"
+          torch_lib="$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
+          echo "LIBTORCH=$torch_root" >> "$GITHUB_ENV"
+          echo "EQUILOAD_CXX11_ABI=$torch_abi" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$torch_lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - name: Check quality
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build and test Rust workspace
+        run: |
+          cargo check --workspace --no-default-features
+          cargo test --workspace --all-features --verbose
+
+      - name: Run C ABI tests
+        run: |
+          cmake -S crates/equiload-sys/ffi -B build/ffi-tests \
+            -DCMAKE_PREFIX_PATH="$LIBTORCH" \
+            -DEQUILOAD_CPU_BRIDGE=ON \
+            -DEQUILOAD_CXX11_ABI="$EQUILOAD_CXX11_ABI" \
+            -DEQUILOAD_ENABLE_HDF5=ON \
+            -DEQUILOAD_BUILD_TESTS=ON
+          cmake --build build/ffi-tests
+          ctest --test-dir build/ffi-tests --output-on-failure
+
+  python-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libhdf5-dev
 
-      - name: Create build environment
+      - name: Build source and wheel artifacts
         run: |
           python -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install maturin pytest h5py torch torch-geometric
-
-      - name: Build and install wheel
-        run: |
-          . .venv/bin/activate
+          python -m pip install maturin pytest h5py ruff torch torch-geometric
+          python -m ruff format --check benchmarks scripts crates/equiload-python/tests
+          python -m ruff check benchmarks scripts crates/equiload-python/tests
+          python -m maturin sdist --out dist
           bash scripts/build-wheel.sh
-          python -m pip install --force-reinstall --no-deps dist/equiload-*.whl
 
-      - name: Test installed wheel
+      - name: Test an isolated source installation
+        run: |
+          python -m venv /tmp/equiload-sdist-test
+          . /tmp/equiload-sdist-test/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install h5py pytest torch torch-geometric
+          python -m pip install --no-deps dist/equiload-*.tar.gz
+          python -m pytest crates/equiload-python/tests -q
+          python -c "import equiload; print(equiload.__file__)"
+
+      - name: Test the built wheel
         run: |
           . .venv/bin/activate
+          python -m pip install --force-reinstall --no-deps dist/equiload-*.whl
           python -m pytest crates/equiload-python/tests -q
           python -c "import equiload; print(equiload.__file__)"
