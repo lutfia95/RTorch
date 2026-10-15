@@ -27,14 +27,29 @@ export HDF5_ROOT=/path/to/hdf5
 bash scripts/install-python.sh
 ```
 
-## Local wheel
+## Wheels
+
+Published Linux wheels are built in a `manylinux_2_28` container for CPython
+3.10–3.13 on x86_64. They bundle HDF5, so no system HDF5 installation is
+needed. PyTorch is deliberately not bundled: install the Torch build you use
+for Equitrain first (CPU or CUDA), then install EquiLoad. EquiLoad itself stays
+CPU-side; PyTorch moves returned batches to the GPU.
+
+The wheel workflow tests the repaired, installed wheel and leaves `libtorch`,
+`libtorch_cpu`, and `libc10` to the installed `torch` package. This preserves
+the user's CUDA choice and avoids shipping a duplicate multi-gigabyte PyTorch.
+
+### Development wheel
 
 ```bash
 bash scripts/build-wheel.sh
 python -m pip install --force-reinstall --no-deps dist/equiload-*.whl
 ```
 
-This produces a **local compatibility wheel**, not a universal binary release: build and install it against the same Python, PyTorch ABI, CUDA variant, and HDF5 ABI. A future published release must provide a tested wheel matrix for those combinations.
+This produces a **local compatibility wheel**, tagged `linux_x86_64`; do not
+upload it to PyPI. It uses the local HDF5 and is only suitable for the
+environment that built it. Use the manylinux workflow artifact for a
+publishable wheel.
 
 ## Use with Equitrain
 
